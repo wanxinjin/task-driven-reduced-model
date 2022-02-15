@@ -181,7 +181,6 @@ class LCS_learner:
         return dtheta_mean, loss_mean, dyn_loss_mean, lcp_loss_mean, dtheta_hessian
 
     def dyn_prediction(self, x_batch, u_batch, theta_val):
-        self.differetiable()
 
         batch_size = x_batch.shape[0]
         theta_val_batch = np.tile(theta_val, (batch_size, 1))
@@ -207,7 +206,6 @@ class LCS_learner:
         x_next_batch = dyn_fn(x_batch.T, u_batch.T, lam_opt_batch.T, theta_val_batch.T).full().T
 
         return x_next_batch, lam_opt_batch
-
 
 
 # class for using a lcs to do mpc control
@@ -372,3 +370,4 @@ class LCS_MPC:
                    }
 
         return opt_sol
+
