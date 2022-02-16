@@ -80,7 +80,7 @@ class LCS_learner:
         self.lcp_offset_fn = Function('lcp_offset_fn', [self.theta], [self.lcp_offset])
         # self.dyn_offset_fn = Function('dyn_offset_fn', [self.theta], [self.dyn_offset])
 
-    def differetiable(self, gamma=1e-3, epsilon=1e5):
+    def differetiable(self, gamma=1e-3, epsilon=0.5):
 
         # define the dynamics loss
         self.x_next = SX.sym('x_next', self.n_state)
@@ -96,7 +96,7 @@ class LCS_learner:
                                                              self.phi - self.dist)
 
         # total loss
-        loss = dyn_loss + lcp_loss / epsilon
+        loss = (1-epsilon)* dyn_loss + epsilon*lcp_loss
         # loss = dot(self.dyn[2:4] - self.x_next[2:4], self.dyn[2:4] - self.x_next[2:4]) + lcp_loss / epsilon
         # loss = (dyn_loss + lcp_loss / epsilon) / (0.5+dot(self.x_next, self.x_next))
 
@@ -181,6 +181,7 @@ class LCS_learner:
         return dtheta_mean, loss_mean, dyn_loss_mean, lcp_loss_mean, dtheta_hessian
 
     def dyn_prediction(self, x_batch, u_batch, theta_val):
+        self.differetiable()
 
         batch_size = x_batch.shape[0]
         theta_val_batch = np.tile(theta_val, (batch_size, 1))
@@ -370,4 +371,33 @@ class LCS_MPC:
                    }
 
         return opt_sol
+
+
+
+# do statistics for the modes
+def statiModes(lam_batch, tol=1e-5):
+    # dimension of the lambda
+    n_lam = lam_batch.shape[1]
+    # total number of modes
+    total_n_mode = float(2 ** n_lam)
+
+    # do the statistics for the modes
+    lam_batch_mode = np.where(lam_batch < tol, 0, 1)
+    unique_mode_list, mode_count_list = np.unique(lam_batch_mode, axis=0, return_counts=True)
+    mode_frequency_list = mode_count_list / lam_batch.shape[0]
+
+
+    return unique_mode_list, mode_frequency_list
+
+
+
+# do the plot of differnet mode
+def plotModes(lam_batch, tol=1e-5):
+    # do the statistics for the modes
+    lam_batch_mode = np.where(lam_batch < tol, 0, 1)
+    unique_mode_list, mode_indices = np.unique(lam_batch_mode, axis=0, return_inverse=True)
+
+    return unique_mode_list, mode_indices
+
+
 
