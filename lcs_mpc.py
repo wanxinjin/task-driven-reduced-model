@@ -1,4 +1,5 @@
-import lcs.task_driven as TD
+import lcs.task_driven as\
+    TD
 import lcs.optim as opt
 import numpy as np
 import matplotlib.pyplot as plt
@@ -20,12 +21,12 @@ F = load_lcs['F']
 lcp_offset = load_lcs['lcp_offset']
 
 true_oc = TD.LCS_MPC(A=A, B=B, C=C, D=D, E=E, F=F, lcp_offset=lcp_offset)
-true_oc.oc_setup(mpc_horizon=20)
+true_oc.oc_setup(mpc_horizon=5)
 Q = np.array([[10, 0, 0], [0, 10, 0], [0, 0, .1]])
 R = np.diag([0.05, 0.05])
 QN = scipy.linalg.solve_discrete_are(A, B, Q, R)
 
-init_state = 1 * np.random.randn(n_state)
+init_state = 0.4 * np.random.randn(n_state)
 # init_state = np.array([0.1, 0.3, 0])
 true_sol = true_oc.mpc(init_state, Q, R, QN)
 true_x_traj = true_sol['state_traj_opt']
@@ -43,7 +44,7 @@ learned_F = learned_lcs['learned_F']
 learned_lcp_offset = learned_lcs['learned_lcp_offset']
 learned_oc = TD.LCS_MPC(A=learned_A, B=learned_B, C=learned_C, D=learned_D, E=learned_E, F=learned_F,
                         lcp_offset=learned_lcp_offset)
-learned_oc.oc_setup(mpc_horizon=20)
+learned_oc.oc_setup(mpc_horizon=5)
 
 # init_state = np.array([0.1, 0.3, 0])
 learned_sol = learned_oc.mpc(init_state, Q, R, QN)
@@ -61,13 +62,6 @@ plt.figure(3)
 plt.plot(true_x_traj[:,2])
 plt.plot(learned_x_traj[:,2])
 
-#
-# plt.figure(4)
-# plt.plot(true_lam_traj[:,0])
-# plt.plot(learned_lam_traj[:,0])
-# plt.figure(5)
-# plt.plot(true_lam_traj[:,1])
-# plt.plot(learned_lam_traj[:,1])
 
 
 

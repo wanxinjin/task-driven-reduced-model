@@ -32,7 +32,7 @@ lcp_offset = lcs_mats['lcp_offset']
 # create the data generator
 data_generator = TD.LCS_learner(n_state, n_control, n_lam, A, B, C, D, E, G, H, lcp_offset, stiffness=0)
 train_data_size = 1000
-train_x_batch = 1 * np.random.uniform(-1, 1, size=(train_data_size, n_state))
+train_x_batch = 4 * np.random.uniform(-1, 1, size=(train_data_size, n_state))
 train_u_batch = 5 * np.random.uniform(-1, 1, size=(train_data_size, n_control))
 train_x_next_batch, train_lam_opt_batch = data_generator.dyn_prediction(train_x_batch, train_u_batch, theta_val=[])
 train_mode_list, train_mode_frequency_list = TD.statiModes(train_lam_opt_batch)
@@ -72,45 +72,41 @@ sc2 = ax.scatter(pred_x, pred_y, s=30, marker="+", cmap='paried')
 plt.draw()
 
 # ==============================   create the learner object    ========================================
-learner = TD.LCS_learner(n_state, n_control, n_lam=2, stiffness=10)
+learner = TD.LCS_learner2(n_state, n_control, n_lam=n_lam, stiffness=10)
 # ================================   beginning the training process    ======================================
 # doing learning process
-curr_theta = 1. * np.random.randn(learner.n_theta)
-# curr_theta = true_theta + 0.5 * np.random.randn(learner.n_theta)
+curr_lcp_theta = 0.1* np.random.randn(learner.n_lcp_theta)
 mini_batch_size = 100
 loss_trace = []
-theta_trace = []
+lcp_theta_trace = []
 optimizier = opt.Adam()
-optimizier.learning_rate = 1e-2
-# epsilon = np.random.random(5000)
-epsilon = np.logspace(3,-2,5000)
+optimizier.learning_rate = 1e-3
+epsilon = np.random.random(5000)
 for k in range(5000):
     # mini batch dataset
     shuffle_index = np.random.permutation(train_data_size)[0:mini_batch_size]
-    x_mini_batch = train_x_batch[shuffle_index]
-    u_mini_batch = train_u_batch[shuffle_index]
-    x_next_mini_batch = train_x_next_batch[shuffle_index]
-    lam_mini_batch = train_lam_opt_batch[shuffle_index]
+    x_minibatch = train_x_batch[shuffle_index]
+    u_minibatch = train_u_batch[shuffle_index]
+    x_next_minibatch = train_x_next_batch[shuffle_index]
+    lam_minibatch = train_lam_opt_batch[shuffle_index]
 
     # compute the lambda batch
-    learner.differetiable(gamma=1, epsilon=epsilon[k])
-    lam_phi_opt_mini_batch, loss_opt_batch = learner.compute_lambda(x_mini_batch, u_mini_batch, x_next_mini_batch,
-                                                                    curr_theta)
+    lam_opt_mini_batch, loss_opt_mini_batch = learner.compute_lambda(x_minibatch, u_minibatch, curr_lcp_theta)
+
+    # regression for the dynamics
+    dyn_theta_opt, dyn_loss_opt = learner.dyn_regression(x_minibatch, u_minibatch, lam_opt_mini_batch, x_next_minibatch)
 
     # compute the gradient
-    dtheta, loss, dyn_loss, lcp_loss, dtheta_hessian = \
-        learner.gradient_step(x_mini_batch, u_mini_batch, x_next_mini_batch, curr_theta, lam_phi_opt_mini_batch,
-                              second_order=False)
+    dlcp_theta = learner.gradient_step(x_minibatch, u_minibatch, x_next_minibatch,lam_opt_mini_batch,dyn_theta_opt,curr_lcp_theta)
 
     # store and update
-    loss_trace += [loss]
-    theta_trace += [curr_theta]
-    curr_theta = optimizier.step(curr_theta, dtheta)
-    # curr_theta = optimizier.step(curr_theta, dtheta_hessian)
+    loss_trace += [dyn_loss_opt]
+    lcp_theta_trace += [curr_lcp_theta]
+    curr_lcp_theta = optimizier.step(curr_lcp_theta, dlcp_theta)
 
     if k % 100 == 0:
         # on the prediction using the current learned lcs
-        pred_x_next_batch, pred_lam_batch = learner.dyn_prediction(train_x_batch, train_u_batch, curr_theta)
+        pred_x_next_batch, pred_lam_batch = learner.dyn_prediction(train_x_batch, train_u_batch, dyn_theta_opt, curr_lcp_theta)
 
         # compute the prediction error
         error_x_next_batch = pred_x_next_batch - train_x_next_batch
@@ -131,22 +127,23 @@ for k in range(5000):
 
         print(
             k,
-            '| loss:', loss,
-            '| loss:', dyn_loss + lcp_loss / epsilon[k],
-            '| grad:', norm_2(dtheta),
-            '| dyn:', dyn_loss,
-            '| lcp:', lcp_loss,
-            '| RPE:', relative_error,
+            '| loss:', dyn_loss_opt,
+            '| grad:', norm_2(dlcp_theta),
+            '| PRE:', relative_error,
             '| PMC:', len(pred_mode_list),
-            '| Epsilon:', epsilon[k],
         )
 
 # save
 
 
 # ================================   do some anlaysis for the learned    ======================================
+# compute the lambda batch
+lam_opt_batch, loss_opt_batch = learner.compute_lambda(train_x_batch, train_u_batch, curr_lcp_theta)
+# regression for the dynamics
+dyn_theta_opt, dyn_loss_opt = learner.dyn_regression(train_x_batch, train_u_batch, lam_opt_batch, train_x_next_batch)
 # on the prediction using the current learned lcs
-pred_x_next_batch, pred_lam_batch = learner.dyn_prediction(train_x_batch, train_u_batch, curr_theta)
+pred_x_next_batch, pred_lam_batch = learner.dyn_prediction(train_x_batch, train_u_batch, dyn_theta_opt, curr_lcp_theta)
+
 # compute the overall relative prediction error
 error_x_next_batch = pred_x_next_batch - train_x_next_batch
 relative_error = (la.norm(error_x_next_batch, axis=1) / la.norm(train_x_next_batch, axis=1)).mean()
@@ -169,18 +166,18 @@ print(pred_error_per_mode_list)
 pred_x = train_x_batch[:, plot_x_indx]
 pred_y = pred_x_next_batch[:, plot_y_indx]
 
-learned_A = learner.A_fn(curr_theta).full()
-learned_B = learner.B_fn(curr_theta).full()
-learned_C = learner.C_fn(curr_theta).full()
-learned_D = learner.D_fn(curr_theta).full()
-learned_E = learner.E_fn(curr_theta).full()
-learned_G = learner.G_fn(curr_theta).full()
-learned_H = learner.H_fn(curr_theta).full()
-learned_F = learner.F_fn(curr_theta).full()
-learned_lcp_offset = learner.lcp_offset_fn(curr_theta).full()
+learned_A = learner.A_fn(dyn_theta_opt).full()
+learned_B = learner.B_fn(dyn_theta_opt).full()
+learned_C = learner.C_fn(dyn_theta_opt).full()
+learned_D = learner.D_fn(curr_lcp_theta).full()
+learned_E = learner.E_fn(curr_lcp_theta).full()
+learned_G = learner.G_fn(curr_lcp_theta).full()
+learned_H = learner.H_fn(curr_lcp_theta).full()
+learned_F = learner.F_fn(curr_lcp_theta).full()
+learned_lcp_offset = learner.lcp_offset_fn(curr_lcp_theta).full()
 
 np.save('learned', {
-    'theta_trace': theta_trace,
+    'theta_trace': lcp_theta_trace,
     'loss_trace': loss_trace,
     'color_list': color_list,
     'train_x': train_x,
