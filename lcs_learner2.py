@@ -72,7 +72,7 @@ sc2 = ax.scatter(pred_x, pred_y, s=30, marker="+", cmap='paried')
 plt.draw()
 
 # ==============================   create the learner object    ========================================
-learner = TD.LCS_learner2(n_state, n_control, n_lam=n_lam, stiffness=10)
+learner = TD.LCS_learner_regression(n_state, n_control, n_lam=n_lam, stiffness=10)
 # ================================   beginning the training process    ======================================
 # doing learning process
 curr_lcp_theta = 0.1* np.random.randn(learner.n_lcp_theta)

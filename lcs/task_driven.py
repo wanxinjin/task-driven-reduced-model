@@ -375,7 +375,7 @@ class LCS_MPC:
 
 
 # class for learning LCS from the hybrid data
-class LCS_learner2:
+class LCS_learner_regression:
     def __init__(self, n_state, n_control, n_lam,
                  A=None, B=None, C=None, D=None, E=None, G=None, H=None, lcp_offset=None,
                  stiffness=0.):
