@@ -1,6 +1,7 @@
 import numpy as np
 from casadi import *
 import numpy.linalg as la
+import matplotlib.pyplot as plt
 
 
 # class for learning LCS from the hybrid data
@@ -782,11 +783,12 @@ class LCS_learner_regression:
 
         return x_next_batch, lam_opt_batch
 
-    def sim_dyn(self, init_x_batch, control_traj_batch, dyn_theta_opt=[], lcp_theta=[]):
+    def sim_dyn(self, init_x_batch, control_traj_batch):
         self.differetiable()
 
         batch_size = init_x_batch.shape[0]
         state_traj_batch = []
+        lam_traj_batch = []
         for i in range(batch_size):
             init_x = init_x_batch[i]
             control_traj = control_traj_batch[i]
@@ -796,16 +798,35 @@ class LCS_learner_regression:
             for t in range(control_horizon):
                 curr_x = state_traj[-1]
                 curr_u = control_traj[t]
-                curr_lcp_data_theta = np.hstack((curr_x, curr_u, lcp_theta))
+                curr_lcp_data_theta = np.hstack((curr_x, curr_u, self.val_lcp_theta))
                 curr_sol = self.lcp_Solver(lbx=0.0, lbg=0.0, p=curr_lcp_data_theta)
                 curr_lam = curr_sol['x'].full().flatten()
-                next_x = self.dyn_fn(curr_x, curr_u, curr_lam, dyn_theta_opt).full().flatten()
+                next_x = self.dyn_fn(curr_x, curr_u, curr_lam, self.val_dyn_theta).full().flatten()
                 state_traj += [next_x]
                 lam_traj += [curr_lam]
             state_traj = np.array(state_traj)
+            lam_traj = np.array(lam_traj)
             state_traj_batch += [state_traj]
+            lam_traj_batch += [lam_traj]
 
-        return state_traj_batch
+        return state_traj_batch, lam_traj_batch
+
+    def computeLCSMats(self):
+        A = self.A_fn(self.val_dyn_theta).full()
+        B = self.B_fn(self.val_dyn_theta).full()
+        C = self.C_fn(self.val_dyn_theta).full()
+
+        D = self.D_fn(self.val_lcp_theta).full()
+        E = self.E_fn(self.val_lcp_theta).full()
+        F = self.F_fn(self.val_lcp_theta).full()
+        lcp_offset = self.lcp_offset_fn(self.val_lcp_theta).full()
+
+        lcs_theta = vertcat(vec(A), vec(B), vec(C),
+                            vec(D), vec(E), vec(F),
+                            vec(lcp_offset))
+
+        # return lcs_theta, A, B, C, D, E, F, lcp_offset
+        return lcs_theta
 
 
 # class for learning LCS from the hybrid data (backup)
@@ -1092,7 +1113,7 @@ def LCSLearningRegression(lcs_learner, optimizier, control_traj_batch, true_stat
 
 
 # learn a lcs model from the sampled data using l4dc paper
-def LCSLearning(lcs_learner, optimizier, control_traj_batch, true_state_traj_batch,
+def LCSLearning(lcs_learner, optimizer, control_traj_batch, true_state_traj_batch,
                 max_iter=5000, minibatch_size=100):
     # converting the data form
     batch_size = len(control_traj_batch)
@@ -1127,7 +1148,7 @@ def LCSLearning(lcs_learner, optimizier, control_traj_batch, true_state_traj_bat
                                       second_order=False)
 
         # store and update
-        lcs_learner.val_theta = optimizier.step(lcs_learner.val_theta, dtheta)
+        lcs_learner.val_theta = optimizer.step(lcs_learner.val_theta, dtheta)
 
         if k % 100 == 0:
             # on the prediction using the current learned lcs
@@ -1151,3 +1172,150 @@ def LCSLearning(lcs_learner, optimizier, control_traj_batch, true_state_traj_bat
 
 # compute the gradient of the control input using the recovery matrix (Jin. et al. IJRR)
 
+
+# evaluation object to evaluate the learned lcs model using a control cost function
+class LCS_evaluation:
+    def __init__(self, lcs_learner):
+        self.name = 'lcs evaluation'
+
+        # define the system variables
+        self.n_state = lcs_learner.n_state
+        self.n_control = lcs_learner.n_control
+        self.n_lam = lcs_learner.n_lam
+
+        # define the system variables
+        self.x = SX.sym('x', self.n_state)
+        self.u = SX.sym('u', self.n_control)
+        self.lam = SX.sym('lam', self.n_lam)
+
+    def setCostFunction(self, Q, R, QN):
+        self.Q = DM(Q)
+        self.R = DM(R)
+        self.QN = DM(QN)
+
+        # define the control cost function
+        self.path_cost = dot(self.x, self.Q @ self.x) + dot(self.u, self.R @ self.u)
+        self.final_cost = dot(self.x, self.QN @ self.x)
+
+    def differentiable(self):
+        self.A = SX.sym('A', self.n_state, self.n_state)
+        self.B = SX.sym('B', self.n_state, self.n_control)
+        self.C = SX.sym('C', self.n_state, self.n_lam)
+
+        self.D = SX.sym('D', self.n_lam, self.n_state)
+        self.E = SX.sym('E', self.n_lam, self.n_control)
+        self.F = SX.sym('F', self.n_lam, self.n_lam)
+        self.lcp_offset = SX.sym('lcp_offset', self.n_lam)
+
+        self.lcs_theta = vertcat(vec(self.A), vec(self.B), vec(self.C),
+                                 vec(self.D), vec(self.E), vec(self.F),
+                                 vec(self.lcp_offset))
+
+        # define the dynamics
+        self.f = self.A @ self.x + self.B @ self.u + self.C @ self.lam
+
+        # define the gradient of lam with respect to lcp_theta
+        self.dist = self.D @ self.x + self.E @ self.u + self.F @ self.lam + self.lcp_offset
+        g = diag(self.lam) @ self.dist
+        dg_dlam = jacobian(g, self.lam)
+        dg_dx = jacobian(g, self.x)
+        dg_du = jacobian(g, self.u)
+        dlam_dx = -inv(dg_dlam) @ dg_dx
+        dlam_du = -inv(dg_dlam) @ dg_du
+
+        # differentiate
+        df_dx = jacobian(self.f, self.x) + jacobian(self.f, self.lam) @ dlam_dx
+        df_du = jacobian(self.f, self.u) + jacobian(self.f, self.lam) @ dlam_du
+
+        self.dfdx_fn = Function('dfdx_fn', [self.x, self.u, self.lam, self.lcs_theta], [df_dx])
+        self.dfdu_fn = Function('dfdx_fn', [self.x, self.u, self.lam, self.lcs_theta], [df_du])
+
+        # compute the gradient of the cost function
+        self.dcdx = jacobian(self.path_cost, self.x).T
+        self.dcdu = jacobian(self.path_cost, self.u).T
+        self.dhdx = jacobian(self.final_cost, self.x).T
+
+        # establish the functions for the above gradient
+        self.dcdx_fn = Function('dcdx_fn', [self.x, self.u], [self.dcdx])
+        self.dcdu_fn = Function('dcdu_fn', [self.x, self.u], [self.dcdu])
+        self.dhdx_fn = Function('dhdx_fn', [self.x], [self.dhdx])
+
+    def EvaluateUpdate(self, lcs_learner, init_state_batch, control_traj_batch, true_state_traj_batch):
+        lcs_theta = lcs_learner.computeLCSMats()
+
+        # compute the state batch_trajectory
+        pred_state_traj_batch, pred_lam_traj_batch = lcs_learner.sim_dyn(init_state_batch, control_traj_batch)
+
+        # debug for ploting
+        plt.plot(true_state_traj_batch[0])
+        plt.plot(pred_state_traj_batch[0])
+        plt.show()
+
+        # control_update trajectory
+        control_update_traj_batch = []
+        cost_batch = []
+
+        batch_size = init_state_batch.shape[0]
+        for i in range(batch_size):
+            u_traj = control_traj_batch[i]
+            x_traj = pred_state_traj_batch[i]
+            lam_traj = pred_lam_traj_batch[i]
+            control_horizon = u_traj.shape[0]
+
+            # compute the recover matrix (see Jin et al. IJRR for details)
+            curr_x = x_traj[0]
+            curr_u = u_traj[0]
+            curr_lam = lam_traj[0]
+            next_x = x_traj[1]
+            next_u = u_traj[1]
+            next_lam = lam_traj[1]
+
+            curr_dfdx = self.dfdx_fn(curr_x, curr_u, curr_lam, lcs_theta)
+            curr_dfdu = self.dfdu_fn(curr_x, curr_u, curr_lam, lcs_theta)
+            curr_dcdx = self.dcdx_fn(curr_x, curr_u)
+            curr_dcdu = self.dcdu_fn(curr_x, curr_u)
+
+            next_dfdx = self.dfdx_fn(next_x, next_u, next_lam, lcs_theta)
+            next_dfdu = self.dfdu_fn(next_x, next_u, next_lam, lcs_theta)
+            next_dcdx = self.dcdx_fn(next_x, next_u)
+            next_dcdu = self.dcdu_fn(next_x, next_u)
+
+            H1 = curr_dfdu.T @ next_dcdx + curr_dcdu
+            H2 = curr_dfdu.T @ next_dfdx.T
+            for t in range(1, control_horizon - 1):
+                curr_x = x_traj[t]
+                curr_u = u_traj[t]
+                next_x = x_traj[t + 1]
+                next_u = u_traj[t + 1]
+
+                curr_dfdx = self.dfdx_fn(curr_x, curr_u, curr_lam, lcs_theta)
+                curr_dfdu = self.dfdu_fn(curr_x, curr_u, curr_lam, lcs_theta)
+                curr_dcdx = self.dcdx_fn(curr_x, curr_u)
+                curr_dcdu = self.dcdu_fn(curr_x, curr_u)
+
+                next_dfdx = self.dfdx_fn(next_x, next_u, next_lam, lcs_theta)
+                next_dfdu = self.dfdu_fn(next_x, next_u, next_lam, lcs_theta)
+                next_dcdx = self.dcdx_fn(next_x, next_u)
+                next_dcdu = self.dcdu_fn(next_x, next_u)
+
+                H1 = vertcat(H1 + H2 @ next_dcdx,
+                             curr_dfdu.T @ next_dcdx + curr_dcdu)
+                H2 = vertcat(H2 @ next_dfdx.T,
+                             curr_dfdu.T @ next_dfdx.T)
+
+            curr_x = x_traj[control_horizon-1]
+            curr_u = u_traj[control_horizon-1]
+            curr_dfdu = self.dfdu_fn(curr_x, curr_u, curr_lam, lcs_theta)
+            curr_dcdu = self.dcdu_fn(curr_x, curr_u)
+            next_x = x_traj[control_horizon]
+            next_dhdx=self.dhdx_fn(next_x)
+            H1 = vertcat(H1 + H2 @ next_dhdx,
+                         curr_dfdu.T @ next_dhdx + curr_dcdu)
+
+
+
+
+
+
+            # recovery_matrix=
+            # for t in range(control_horizon):

@@ -32,7 +32,7 @@ true_dyn_theta = vertcat(vec(A), vec(B), vec(C)).full().flatten()
 true_theta = vertcat(true_dyn_theta, true_lcp_theta).full().flatten()
 # ============================= establish the lcs learner (automatically initialized)
 lcs_learner = TD.LCS_learner_regression(n_state, n_control, n_lam, stiffness=1)
-# lcs_learner.val_lcp_theta = true_lcp_theta
+lcs_learner.val_lcp_theta = true_lcp_theta + 1.0 * np.random.randn(true_lcp_theta.size)
 # lcs_learner = TD.LCS_learner(n_state, n_control, n_lam, stiffness=0)
 # lcs_learner.val_theta = true_theta
 # ============================= starting from 10 various initial conditions
@@ -45,18 +45,26 @@ optimizier.learning_rate = 1e-2
 control_horizon = 20
 control_traj_batch = TD.randomControlTraj(traj_count, control_horizon, n_control)
 
+# ============================= initialize an evaluator for the learned system
+evaluator = TD.LCS_evaluation(lcs_learner)
+Q = 2 * np.eye(n_state)
+QN = Q
+R = np.eye(n_control)
+evaluator.setCostFunction(Q, R, QN)
+evaluator.differentiable()
+
 # ================= starting the learning process
 for i in range(1):
     # ============================= sample from the true system to obtain the state trajctory
-    true_state_traj_batch = true_sys.sim_dyn(init_state_batch, control_traj_batch)
+    true_state_traj_batch, true_lam_traj_batch = true_sys.sim_dyn(init_state_batch, control_traj_batch)
     # plot the trajectory
     # for state_traj in true_state_traj_batch:
     #     plt.plot(state_traj)
     # plt.show()
 
     # ============================= learn the true lcs system from the true data
-    TD.LCSLearningRegression(lcs_learner, optimizier, control_traj_batch, true_state_traj_batch)
+    TD.LCSLearningRegression(lcs_learner, optimizier, control_traj_batch, true_state_traj_batch, max_iter=1000)
     # TD.LCSLearning(lcs_learner, optimizier, control_traj_batch, true_state_traj_batch)
 
-    # =========================== compute the gradient of the control input using
-
+    # =========================== evaluate the current lcs and compute the gradient
+    evaluator.EvaluateUpdate(lcs_learner, init_state_batch, control_traj_batch, true_state_traj_batch)
