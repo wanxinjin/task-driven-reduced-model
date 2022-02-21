@@ -569,6 +569,7 @@ class LCS_MPC:
         sol = self.solver(x0=self.w0, lbx=self.lbw, ubx=self.ubw, lbg=self.lbg, ubg=self.ubg, p=oc_parameters)
         w_opt = sol['x']
         g = sol['g']
+        cost_opt=sol['f']
 
         # extract the optimal control and state
         sol_traj = w_opt[0:self.mpc_horizon * (self.n_state + self.n_control + self.n_lam)].reshape(
@@ -582,6 +583,7 @@ class LCS_MPC:
                    'control_traj_opt': u_traj.full(),
                    'lam_traj_opt': lam_traj.full(),
                    'w_opt': w_opt,
+                   'cost_opt': cost_opt,
                    }
 
         return opt_sol
@@ -1059,7 +1061,7 @@ def randomControlTraj(traj_count, horizon, n_control):
 
 # learn a lcs model from the sampled data using regression algorithms
 def LCSLearningRegression(lcs_learner, optimizier, control_traj_batch, true_state_traj_batch,
-                          max_iter=5000, minibatch_size=100):
+                          max_iter=5000, minibatch_size=100, print_level=0):
     # converting the data form
     batch_size = len(control_traj_batch)
     train_u_batch = []
@@ -1095,21 +1097,22 @@ def LCSLearningRegression(lcs_learner, optimizier, control_traj_batch, true_stat
         # store and update
         lcs_learner.val_lcp_theta = optimizier.step(lcs_learner.val_lcp_theta, dlcp_theta)
 
-        if k % 100 == 0:
-            # on the prediction using the current learned lcs
-            pred_x_next_batch, pred_lam_batch = lcs_learner.dyn_prediction(train_x_batch, train_u_batch)
+        if print_level is not 0:
+            if k % 100 == 0:
+                # on the prediction using the current learned lcs
+                pred_x_next_batch, pred_lam_batch = lcs_learner.dyn_prediction(train_x_batch, train_u_batch)
 
-            # compute the prediction error
-            error_x_next_batch = pred_x_next_batch - train_x_next_batch
-            relative_error = (
-                    la.norm(error_x_next_batch, axis=1) / (la.norm(train_x_next_batch, axis=1) + 0.0001)).mean()
+                # compute the prediction error
+                error_x_next_batch = pred_x_next_batch - train_x_next_batch
+                relative_error = (
+                        la.norm(error_x_next_batch, axis=1) / (la.norm(train_x_next_batch, axis=1) + 0.0001)).mean()
 
-            print(
-                k,
-                '| loss:', dyn_loss_opt,
-                '| grad:', norm_2(dlcp_theta),
-                '| PRE:', relative_error,
-            )
+                print(
+                    k,
+                    '| loss:', dyn_loss_opt,
+                    '| grad:', norm_2(dlcp_theta),
+                    '| PRE:', relative_error,
+                )
 
 
 # learn a lcs model from the sampled data using l4dc paper
@@ -1188,14 +1191,37 @@ class LCS_evaluation:
         self.u = SX.sym('u', self.n_control)
         self.lam = SX.sym('lam', self.n_lam)
 
-    def setCostFunction(self, Q, R, QN):
+    def setCostFunction(self, Q, R, QN, control_horizon):
         self.Q = DM(Q)
         self.R = DM(R)
         self.QN = DM(QN)
+        self.control_horizon = control_horizon
 
         # define the control cost function
         self.path_cost = dot(self.x, self.Q @ self.x) + dot(self.u, self.R @ self.u)
         self.final_cost = dot(self.x, self.QN @ self.x)
+
+        self.path_cost_fn = Function('path_cost_fn', [self.x, self.u], [self.path_cost])
+        self.final_cost_fn = Function('final_cost_fn', [self.x], [self.final_cost])
+
+    def computeCost(self, control_traj_batch, state_traj_batch):
+        cost_batch = []
+        batch_size = len(control_traj_batch)
+        for i in range(batch_size):
+            u_traj = control_traj_batch[i]
+            x_traj = state_traj_batch[i]
+
+            cost = 0.0
+            for t in range(self.control_horizon):
+                curr_x = x_traj[t]
+                curr_u = u_traj[t]
+                cost += self.path_cost_fn(curr_x, curr_u)
+
+            cost += self.final_cost_fn(x_traj[-1])
+
+            cost_batch += [cost]
+
+        return cost_batch
 
     def differentiable(self):
         self.A = SX.sym('A', self.n_state, self.n_state)
@@ -1240,82 +1266,242 @@ class LCS_evaluation:
         self.dcdu_fn = Function('dcdu_fn', [self.x, self.u], [self.dcdu])
         self.dhdx_fn = Function('dhdx_fn', [self.x], [self.dhdx])
 
-    def EvaluateUpdate(self, lcs_learner, init_state_batch, control_traj_batch, true_state_traj_batch):
+    # I use the single shooting method to update the control sequence but it does not work
+    def Evaluate(self, lcs_learner, init_state_batch, control_traj_batch, true_state_traj_batch):
         lcs_theta = lcs_learner.computeLCSMats()
 
         # compute the state batch_trajectory
         pred_state_traj_batch, pred_lam_traj_batch = lcs_learner.sim_dyn(init_state_batch, control_traj_batch)
 
-        # debug for ploting
-        plt.plot(true_state_traj_batch[0])
-        plt.plot(pred_state_traj_batch[0])
-        plt.show()
+        # # debug for plotting
+        # plt.plot(true_state_traj_batch[0])
+        # plt.plot(pred_state_traj_batch[0])
+        # plt.show()
 
         # control_update trajectory
         control_update_traj_batch = []
-        cost_batch = []
+        model_cost_batch = []
+        true_sys_cost_batch = []
 
         batch_size = init_state_batch.shape[0]
         for i in range(batch_size):
             u_traj = control_traj_batch[i]
-            x_traj = pred_state_traj_batch[i]
-            lam_traj = pred_lam_traj_batch[i]
+            pred_x_traj = pred_state_traj_batch[i]
+            pred_lam_traj = pred_lam_traj_batch[i]
+            true_x_traj = true_state_traj_batch[i]
             control_horizon = u_traj.shape[0]
 
             # compute the recover matrix (see Jin et al. IJRR for details)
-            curr_x = x_traj[0]
+            curr_x = pred_x_traj[0]
             curr_u = u_traj[0]
-            curr_lam = lam_traj[0]
-            next_x = x_traj[1]
+            curr_lam = pred_lam_traj[0]
+            next_x = pred_x_traj[1]
             next_u = u_traj[1]
-            next_lam = lam_traj[1]
+            next_lam = pred_lam_traj[1]
 
-            curr_dfdx = self.dfdx_fn(curr_x, curr_u, curr_lam, lcs_theta)
             curr_dfdu = self.dfdu_fn(curr_x, curr_u, curr_lam, lcs_theta)
-            curr_dcdx = self.dcdx_fn(curr_x, curr_u)
             curr_dcdu = self.dcdu_fn(curr_x, curr_u)
 
             next_dfdx = self.dfdx_fn(next_x, next_u, next_lam, lcs_theta)
-            next_dfdu = self.dfdu_fn(next_x, next_u, next_lam, lcs_theta)
             next_dcdx = self.dcdx_fn(next_x, next_u)
-            next_dcdu = self.dcdu_fn(next_x, next_u)
 
             H1 = curr_dfdu.T @ next_dcdx + curr_dcdu
             H2 = curr_dfdu.T @ next_dfdx.T
+
+            model_cost = self.path_cost_fn(curr_x, curr_u)
+            true_sys_cost = self.path_cost_fn(true_x_traj[0], curr_u)
             for t in range(1, control_horizon - 1):
-                curr_x = x_traj[t]
+                curr_x = pred_x_traj[t]
                 curr_u = u_traj[t]
-                next_x = x_traj[t + 1]
+                next_x = pred_x_traj[t + 1]
                 next_u = u_traj[t + 1]
 
-                curr_dfdx = self.dfdx_fn(curr_x, curr_u, curr_lam, lcs_theta)
                 curr_dfdu = self.dfdu_fn(curr_x, curr_u, curr_lam, lcs_theta)
-                curr_dcdx = self.dcdx_fn(curr_x, curr_u)
                 curr_dcdu = self.dcdu_fn(curr_x, curr_u)
 
                 next_dfdx = self.dfdx_fn(next_x, next_u, next_lam, lcs_theta)
-                next_dfdu = self.dfdu_fn(next_x, next_u, next_lam, lcs_theta)
                 next_dcdx = self.dcdx_fn(next_x, next_u)
-                next_dcdu = self.dcdu_fn(next_x, next_u)
 
                 H1 = vertcat(H1 + H2 @ next_dcdx,
                              curr_dfdu.T @ next_dcdx + curr_dcdu)
                 H2 = vertcat(H2 @ next_dfdx.T,
                              curr_dfdu.T @ next_dfdx.T)
 
-            curr_x = x_traj[control_horizon-1]
-            curr_u = u_traj[control_horizon-1]
+                model_cost += self.path_cost_fn(curr_x, curr_u)
+                true_sys_cost += self.path_cost_fn(true_x_traj[t], curr_u)
+
+            curr_x = pred_x_traj[control_horizon - 1]
+            curr_u = u_traj[control_horizon - 1]
             curr_dfdu = self.dfdu_fn(curr_x, curr_u, curr_lam, lcs_theta)
             curr_dcdu = self.dcdu_fn(curr_x, curr_u)
-            next_x = x_traj[control_horizon]
-            next_dhdx=self.dhdx_fn(next_x)
+            next_x = pred_x_traj[control_horizon]
+            next_dhdx = self.dhdx_fn(next_x)
             H1 = vertcat(H1 + H2 @ next_dhdx,
-                         curr_dfdu.T @ next_dhdx + curr_dcdu)
+                         curr_dfdu.T @ next_dhdx + curr_dcdu).full().flatten()
+
+            model_cost += self.path_cost_fn(curr_x, curr_u)
+            true_sys_cost += self.path_cost_fn(true_x_traj[control_horizon - 1], curr_u)
+            model_cost += self.final_cost_fn(next_x)
+            true_sys_cost += self.final_cost_fn(true_x_traj[control_horizon])
+
+            control_update_traj_batch += [H1.reshape((-1, self.n_control))]
+            model_cost_batch += [model_cost]
+            true_sys_cost_batch += [true_sys_cost]
+
+        return control_update_traj_batch, model_cost_batch, true_sys_cost_batch
+
+    def Update(self, control_traj_batch, control_update_batch, step_size=1e-4):
+
+        batch_size = len(control_traj_batch)
+        new_control_traj_batch = []
+        for i in range(batch_size):
+            control_traj = control_traj_batch[i]
+            update_traj = control_update_batch[i]
+            new_control_traj = control_traj - step_size * update_traj
+            new_control_traj_batch += [new_control_traj]
+
+        return new_control_traj_batch
+
+    # Then I think about to update the control sequence using multiple-shooting (this can be further improved)
+    def initializeUpdater(self, proximity_epsilon=1e-3):
+
+        self.differentiable()
+
+        # Start with an empty NLP
+        w = []
+        w0 = []
+        lbw = []
+        ubw = []
+        J = 0
+        g = []
+        lbg = []
+        ubg = []
+        p = []
+
+        # "Lift" initial conditions
+        Xk = casadi.SX.sym('X0', self.n_state)
+        w += [Xk]
+        lbw += np.zeros(self.n_state).tolist()
+        ubw += np.zeros(self.n_state).tolist()
+        w0 += np.zeros(self.n_state).tolist()
+
+        # formulate the NLP
+        for k in range(self.control_horizon):
+            # New NLP variable for the control
+            Uk = casadi.SX.sym('U_' + str(k), self.n_control)
+            w += [Uk]
+            lbw += self.n_control * [-inf]
+            ubw += self.n_control * [inf]
+            w0 += self.n_control * [0.]
+
+            # new NLP variable for the complementarity variable
+            Lamk = casadi.SX.sym('lam' + str(k), self.n_lam)
+            w += [Lamk]
+            lbw += self.n_lam * [0.]
+            ubw += self.n_lam * [inf]
+            w0 += self.n_lam * [0.]
+
+            # Add complementarity equation
+            g += [self.D @ Xk + self.E @ Uk + self.F @ Lamk + self.lcp_offset]
+            lbg += self.n_lam * [0.]
+            ubg += self.n_lam * [inf]
+
+            g += [casadi.dot(self.D @ Xk + self.E @ Uk + self.F @ Lamk + self.lcp_offset, Lamk)]
+            lbg += [0.]
+            ubg += [0.]
+
+            # Integrate till the end of the interval
+            Xnext = self.A @ Xk + self.B @ Uk + self.C @ Lamk
+
+            # compute the current cost
+            Uk_ref = SX.sym('Uk_ref' + str(k), self.n_control)
+            p += [Uk_ref]
+
+            Ck = dot(Xk, self.Q @ Xk) + dot(Uk, self.R @ Uk) + dot(Uk - Uk_ref, Uk - Uk_ref) / proximity_epsilon
+            J = J + Ck
+
+            # New NLP variable for state at end of interval
+            Xk = casadi.SX.sym('X_' + str(k + 1), self.n_state)
+            w += [Xk]
+            lbw += self.n_state * [-inf]
+            ubw += self.n_state * [inf]
+            w0 += self.n_state * [0.]
+
+            # Add constraint for the dynamics
+            g += [Xnext - Xk]
+            lbg += self.n_state * [0.]
+            ubg += self.n_state * [0.]
+
+        # Add the final cost
+        J = J + dot(Xk, self.QN @ Xk)
+
+        # Create an NLP solver and solve
+        p += [self.lcs_theta]
+        opts = {'ipopt.print_level': 0, 'ipopt.sb': 'yes', 'print_time': 0}
+        prob = {'f': J, 'x': casadi.vertcat(*w), 'g': casadi.vertcat(*g), 'p': vertcat(*p)}
+        self.oc_solver = casadi.nlpsol('solver', 'ipopt', prob, opts)
+
+        self.lbw = DM(lbw)
+        self.ubw = DM(ubw)
+        self.lbg = DM(lbg)
+        self.ubg = DM(ubg)
+        self.w0 = DM(w0)
+
+    def EvaluateMS(self, lcs_learner, init_state_batch, control_traj_batch, true_state_traj_batch):
+
+        if not hasattr(self, 'solver'):
+            self.initializeUpdater()
+
+        lcs_theta = lcs_learner.computeLCSMats()
+
+        # compute the state batch_trajectory
+        pred_state_traj_batch, pred_lam_traj_batch = lcs_learner.sim_dyn(init_state_batch, control_traj_batch)
+
+        # # debug for plotting
+        # plt.plot(true_state_traj_batch[0])
+        # plt.plot(pred_state_traj_batch[0])
+        # plt.show()
+
+        # ===============================================
+        # given the current control sequence, compute the cost for the learned model and true system
+        model_cost_batch = self.computeCost(control_traj_batch, pred_state_traj_batch)
+
+        # ===============================================
+        # do the update of the control sequence
+        batch_size = len(control_traj_batch)
+        updated_control_traj_batch = []
+        updated_pred_state_traj_batch = []
+        updated_pred_lam_traj_batch = []
+        for i in range(batch_size):
+            u_traj = control_traj_batch[i]
+            init_state = init_state_batch[i]
+
+            # set up the oc solver
+            oc_para = vertcat(u_traj.flatten(), lcs_theta)
+            self.lbw[0:self.n_state] = DM(init_state)
+            self.ubw[0:self.n_state] = DM(init_state)
+            self.w0[0:self.n_state] = DM(init_state)
+
+            # Solve the NLP
+            sol = self.oc_solver(x0=self.w0, lbx=self.lbw, ubx=self.ubw, lbg=self.lbg, ubg=self.ubg, p=oc_para)
+            w_opt = sol['x']
+            g = sol['g']
+
+            # extract the optimal control and state
+            sol_traj = w_opt[0:self.control_horizon * (self.n_state + self.n_control + self.n_lam)].reshape(
+                (self.n_state + self.n_control + self.n_lam, -1))
+            x_traj = casadi.horzcat(sol_traj[0:self.n_state, :],
+                                    w_opt[self.control_horizon * (self.n_state + self.n_control + self.n_lam):]).T
+            u_traj = sol_traj[self.n_state:self.n_state + self.n_control, :].T
+            lam_traj = sol_traj[self.n_state + self.n_control:, :].T
+
+            updated_control_traj_batch += [u_traj.full()]
+            updated_pred_state_traj_batch += [x_traj.full()]
+            updated_pred_lam_traj_batch += [lam_traj.full()]
+
+        # ===============================================
+        # given the updated control sequence, compute the cost for the learned model and true system
+        updated_model_cost_batch = self.computeCost(updated_control_traj_batch, updated_pred_state_traj_batch)
 
 
-
-
-
-
-            # recovery_matrix=
-            # for t in range(control_horizon):
+        return updated_control_traj_batch, model_cost_batch, updated_model_cost_batch
