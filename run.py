@@ -68,6 +68,7 @@ true_sys_opt_state_traj_batch, _ = true_sys.sim_dyn(init_state_batch, true_sys_o
 true_sys_opt_cost_batch = evaluator.computeCost(true_sys_opt_control_traj_batch, true_sys_opt_state_traj_batch)
 
 # ================= starting the learning process
+control_cost_trace=[]
 for i in range(5000):
     # ============================= sample from the true system to obtain the state trajectory
     true_state_traj_batch, true_lam_traj_batch = true_sys.sim_dyn(init_state_batch, control_traj_batch)
@@ -88,14 +89,16 @@ for i in range(5000):
 
     # =========================== print
     updated_true_state_traj_batch, _ = true_sys.sim_dyn(init_state_batch, control_traj_batch)
-    updated_true_sys_cost_batch = evaluator.computeCost(control_traj_batch, true_state_traj_batch)
+    updated_true_sys_cost_batch = evaluator.computeCost(control_traj_batch, updated_true_state_traj_batch)
     print(
         '==================================================\n'
         '| Control Iter:', i,
         # '| model_cost:', np.mean(model_cost_batch),
-        '| learned model current cost:', np.mean(updated_model_cost_batch),
+        '| learned lcs model current cost:', np.mean(updated_model_cost_batch),
         # '| true_sys_cost:', np.mean(true_sys_cost_batch),
         '| true_sys current cost:', np.mean(updated_true_sys_cost_batch),
         '| true_sys optimal cost:', np.mean(true_sys_opt_cost_batch),
         '\n=================================================='
     )
+    control_cost_trace+=[np.mean(updated_true_sys_cost_batch)]
+
