@@ -49,6 +49,7 @@ optimizier.learning_rate = 1e-2
 
 # ============================= initialize a random control sequence for each initial condition
 control_traj_batch = TD.randomControlTraj(traj_count, control_horizon, n_control)
+init_control_traj_batch = control_traj_batch
 
 # ============================= initialize an evaluator for the learned system
 evaluator = TD.LCS_evaluation(lcs_learner)
@@ -110,11 +111,13 @@ for control_iter in range(500):
 learned_lcs_mats = lcs_learner.computeLCSMats(compact=False)
 np.save('results',
         {
+            'init_control_traj_batch': init_control_traj_batch,
             'control_cost_trace': control_cost_trace,
             'control_traj_batch': control_traj_batch,
             'init_state_batch': init_state_batch,
             'learned_lcs_mats': learned_lcs_mats,
             'Q': Q,
             'QN': QN,
-            'R': R
+            'R': R,
+            'control_horizon': control_horizon,
         })
