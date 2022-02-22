@@ -1447,7 +1447,7 @@ class LCS_evaluation:
         self.ubg = DM(ubg)
         self.w0 = DM(w0)
 
-    def EvaluateMS(self, lcs_learner, init_state_batch, control_traj_batch, true_state_traj_batch):
+    def EvaluateMS(self, lcs_learner, init_state_batch, control_traj_batch):
 
         if not hasattr(self, 'solver'):
             self.initializeUpdater()
@@ -1485,7 +1485,6 @@ class LCS_evaluation:
             # Solve the NLP
             sol = self.oc_solver(x0=self.w0, lbx=self.lbw, ubx=self.ubw, lbg=self.lbg, ubg=self.ubg, p=oc_para)
             w_opt = sol['x']
-            g = sol['g']
 
             # extract the optimal control and state
             sol_traj = w_opt[0:self.control_horizon * (self.n_state + self.n_control + self.n_lam)].reshape(
@@ -1499,9 +1498,5 @@ class LCS_evaluation:
             updated_pred_state_traj_batch += [x_traj.full()]
             updated_pred_lam_traj_batch += [lam_traj.full()]
 
-        # ===============================================
-        # given the updated control sequence, compute the cost for the learned model and true system
-        updated_model_cost_batch = self.computeCost(updated_control_traj_batch, updated_pred_state_traj_batch)
 
-
-        return updated_control_traj_batch, model_cost_batch, updated_model_cost_batch
+        return updated_control_traj_batch, model_cost_batch
