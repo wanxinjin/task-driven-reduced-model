@@ -1108,7 +1108,7 @@ def LCSLearningRegression(lcs_learner, optimizier, control_traj_batch, true_stat
                         la.norm(error_x_next_batch, axis=1) / (la.norm(train_x_next_batch, axis=1) + 0.0001)).mean()
 
                 print(
-                    k,
+                    'Model Learning Iter',k,
                     '| loss:', dyn_loss_opt,
                     '| grad:', norm_2(dlcp_theta),
                     '| PRE:', relative_error,
