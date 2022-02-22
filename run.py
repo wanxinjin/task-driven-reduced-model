@@ -68,7 +68,7 @@ true_sys_opt_cost_batch = evaluator.computeCost(true_sys_opt_control_traj_batch,
 
 # ================= starting the data-driven model learning process
 control_cost_trace = []
-for control_iter in range(5000):
+for control_iter in range(500):
     # ============================= sample from the true system to obtain the state trajectory
     true_state_traj_batch, true_lam_traj_batch = true_sys.sim_dyn(init_state_batch, control_traj_batch)
 
@@ -113,5 +113,8 @@ np.save('results',
             'control_cost_trace': control_cost_trace,
             'control_traj_batch': control_traj_batch,
             'init_state_batch': init_state_batch,
-            'learned_lcs_mats': learned_lcs_mats
+            'learned_lcs_mats': learned_lcs_mats,
+            'Q': Q,
+            'QN': QN,
+            'R': R
         })

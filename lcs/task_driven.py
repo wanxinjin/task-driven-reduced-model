@@ -820,6 +820,8 @@ class LCS_learner_regression:
         D = self.D_fn(self.val_lcp_theta).full()
         E = self.E_fn(self.val_lcp_theta).full()
         F = self.F_fn(self.val_lcp_theta).full()
+        G = self.G_fn(self.val_lcp_theta).full()
+        H = self.H_fn(self.val_lcp_theta).full()
         lcp_offset = self.lcp_offset_fn(self.val_lcp_theta).full()
 
         lcs_theta = vertcat(vec(A), vec(B), vec(C),
@@ -836,6 +838,8 @@ class LCS_learner_regression:
                     'D': D,
                     'E': E,
                     'F': F,
+                    'G': G,
+                    'H': H,
                     'lcp_offset': lcp_offset,
                     }
 
@@ -1496,9 +1500,8 @@ class LCS_evaluation:
                 init_w = self.w0
                 init_w[0:self.n_state] = DM(init_state)
             else:
-                init_w=self.warm_start[i]
+                init_w = self.warm_start[i]
                 init_w[0:self.n_state] = DM(init_state)
-
 
             # Solve the NLP
             sol = self.oc_solver(x0=init_w, lbx=lbw, ubx=ubw, lbg=self.lbg, ubg=self.ubg, p=oc_para)
