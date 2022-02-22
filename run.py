@@ -32,18 +32,17 @@ true_dyn_theta = vertcat(vec(A), vec(B), vec(C)).full().flatten()
 true_theta = vertcat(true_dyn_theta, true_lcp_theta).full().flatten()
 
 # control cost function
-control_horizon = 20
+control_horizon = 4
 Q = 2 * np.eye(n_state)
 QN = Q
 R = np.eye(n_control)
 
 # ============================= establish the lcs learner (automatically initialized)
 lcs_learner = TD.LCS_learner_regression(n_state, n_control, n_lam, stiffness=0)
-lcs_learner.val_lcp_theta = true_lcp_theta + 1. * np.random.randn(true_lcp_theta.size)
-# lcs_learner = TD.LCS_learner(n_state, n_control, n_lam, stiffness=0)
-# lcs_learner.val_theta = true_theta
+lcs_learner.val_lcp_theta = 0.0 * true_lcp_theta + 1. * np.random.randn(true_lcp_theta.size)
+
 # ============================= starting from 10 various initial conditions
-traj_count = 50
+traj_count = 60
 init_state_batch = np.random.randn(traj_count, n_state)
 optimizier = opt.Adam()
 optimizier.learning_rate = 1e-2
@@ -56,20 +55,20 @@ evaluator = TD.LCS_evaluation(lcs_learner)
 evaluator.setCostFunction(Q, R, QN, control_horizon)
 evaluator.differentiable()
 
-# =============================== compute the true optimal cost (for comparison)
+# =============================== compute the true optimal cost (for reference, this is not always correct)
 true_sys_oc_solver = TD.LCS_MPC(A, B, C, D, E, F, lcp_offset)
 true_sys_oc_solver.oc_setup(control_horizon)
 true_sys_opt_control_traj_batch = []
 for i in range(traj_count):
     true_sys_sol = true_sys_oc_solver.mpc(init_state_batch[i], Q, R, QN)
     true_sys_opt_control_traj_batch += [true_sys_sol['control_traj_opt']]
-
-true_sys_opt_state_traj_batch, _ = true_sys.sim_dyn(init_state_batch, true_sys_opt_control_traj_batch)
+true_sys_opt_state_traj_batch, true_sys_opt_lam_traj_batch = true_sys.sim_dyn(init_state_batch,
+                                                                              true_sys_opt_control_traj_batch)
 true_sys_opt_cost_batch = evaluator.computeCost(true_sys_opt_control_traj_batch, true_sys_opt_state_traj_batch)
 
-# ================= starting the learning process
+# ================= starting the data-driven model learning process
 control_cost_trace = []
-for i in range(5000):
+for control_iter in range(5000):
     # ============================= sample from the true system to obtain the state trajectory
     true_state_traj_batch, true_lam_traj_batch = true_sys.sim_dyn(init_state_batch, control_traj_batch)
 
@@ -77,27 +76,42 @@ for i in range(5000):
     true_sys_cost_batch = evaluator.computeCost(control_traj_batch, true_state_traj_batch)
 
     # ============================= learn the true lcs system from the true data
-    TD.LCSLearningRegression(lcs_learner, optimizier, control_traj_batch, true_state_traj_batch, max_iter=1000,
+    print('======================================================================')
+    print('| Control Iter:', control_iter)
+    if control_iter < 2:
+        lcs_max_iter = 1000
+    else:
+        lcs_max_iter = 500  # why: because the lcs_learner is always warm started with the previous control iteration
+    TD.LCSLearningRegression(lcs_learner, optimizier, control_traj_batch, true_state_traj_batch, max_iter=lcs_max_iter,
                              print_level=1)
-    # TD.LCSLearning(lcs_learner, optimizier, control_traj_batch, true_state_traj_batch)
 
     # =========================== evaluate the current lcs and compute the gradient
-    control_traj_batch, model_cost_batch = evaluator.EvaluateMS(lcs_learner,
-                                                                init_state_batch,
-                                                                control_traj_batch,
-                                                                )
+    new_control_traj_batch = evaluator.EvaluateMS(lcs_learner, init_state_batch, control_traj_batch)
 
-    # =========================== print
-    updated_true_state_traj_batch, _ = true_sys.sim_dyn(init_state_batch, control_traj_batch)
-    updated_true_sys_cost_batch = evaluator.computeCost(control_traj_batch, updated_true_state_traj_batch)
+    # =========================== update the control trajectories
+    control_traj_batch = new_control_traj_batch
+
+    # print
+    updated_true_sys_state_traj_batch, _ = true_sys.sim_dyn(init_state_batch, control_traj_batch)
+    updated_true_sys_cost_batch = evaluator.computeCost(control_traj_batch, updated_true_sys_state_traj_batch)
+    updated_model_state_traj_batch, _ = lcs_learner.sim_dyn(init_state_batch, control_traj_batch)
+    updated_model_cost_batch = evaluator.computeCost(control_traj_batch, updated_model_state_traj_batch)
+
     print(
-        '==================================================\n'
-        '| Control Iter:', i,
-        # '| model_cost:', np.mean(model_cost_batch),
-        '| learned lcs model current cost:', np.mean(model_cost_batch),
-        # '| true_sys_cost:', np.mean(true_sys_cost_batch),
+        '\n|****** Control Iter:', control_iter,
+        '| learned lcs model current cost:', np.mean(updated_model_cost_batch),
         '| true_sys current cost:', np.mean(updated_true_sys_cost_batch),
-        '| true_sys optimal cost:', np.mean(true_sys_opt_cost_batch),
-        '\n=================================================='
+        '| true_sys optimal cost (could be wrong):', np.mean(true_sys_opt_cost_batch),
+        '\n'
     )
     control_cost_trace += [np.mean(updated_true_sys_cost_batch)]
+
+# save the learned model
+learned_lcs_mats = lcs_learner.computeLCSMats(compact=False)
+np.save('results',
+        {
+            'control_cost_trace': control_cost_trace,
+            'control_traj_batch': control_traj_batch,
+            'init_state_batch': init_state_batch,
+            'learned_lcs_mats': learned_lcs_mats
+        })

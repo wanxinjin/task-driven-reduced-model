@@ -568,8 +568,7 @@ class LCS_MPC:
         # Solve the NLP
         sol = self.solver(x0=self.w0, lbx=self.lbw, ubx=self.ubw, lbg=self.lbg, ubg=self.ubg, p=oc_parameters)
         w_opt = sol['x']
-        g = sol['g']
-        cost_opt=sol['f']
+        cost_opt = sol['f']
 
         # extract the optimal control and state
         sol_traj = w_opt[0:self.mpc_horizon * (self.n_state + self.n_control + self.n_lam)].reshape(
@@ -813,7 +812,7 @@ class LCS_learner_regression:
 
         return state_traj_batch, lam_traj_batch
 
-    def computeLCSMats(self):
+    def computeLCSMats(self, compact=True):
         A = self.A_fn(self.val_dyn_theta).full()
         B = self.B_fn(self.val_dyn_theta).full()
         C = self.C_fn(self.val_dyn_theta).full()
@@ -828,7 +827,17 @@ class LCS_learner_regression:
                             vec(lcp_offset))
 
         # return lcs_theta, A, B, C, D, E, F, lcp_offset
-        return lcs_theta
+        if compact is True:
+            return lcs_theta
+        else:
+            return {'A': A,
+                    'B': B,
+                    'C': C,
+                    'D': D,
+                    'E': E,
+                    'F': F,
+                    'lcp_offset': lcp_offset,
+                    }
 
 
 # class for learning LCS from the hybrid data (backup)
@@ -1108,7 +1117,7 @@ def LCSLearningRegression(lcs_learner, optimizier, control_traj_batch, true_stat
                         la.norm(error_x_next_batch, axis=1) / (la.norm(train_x_next_batch, axis=1) + 0.0001)).mean()
 
                 print(
-                    'Model Learning Iter',k,
+                    'lcs learning iter', k,
                     '| loss:', dyn_loss_opt,
                     '| grad:', norm_2(dlcp_theta),
                     '| PRE:', relative_error,
@@ -1447,6 +1456,9 @@ class LCS_evaluation:
         self.ubg = DM(ubg)
         self.w0 = DM(w0)
 
+        # this is  warming start for acceleration of ipopt solver
+        self.warm_start = []
+
     def EvaluateMS(self, lcs_learner, init_state_batch, control_traj_batch):
 
         if not hasattr(self, 'solver'):
@@ -1456,15 +1468,10 @@ class LCS_evaluation:
 
         # compute the state batch_trajectory
         pred_state_traj_batch, pred_lam_traj_batch = lcs_learner.sim_dyn(init_state_batch, control_traj_batch)
-
         # # debug for plotting
         # plt.plot(true_state_traj_batch[0])
         # plt.plot(pred_state_traj_batch[0])
         # plt.show()
-
-        # ===============================================
-        # given the current control sequence, compute the cost for the learned model and true system
-        model_cost_batch = self.computeCost(control_traj_batch, pred_state_traj_batch)
 
         # ===============================================
         # do the update of the control sequence
@@ -1472,19 +1479,31 @@ class LCS_evaluation:
         updated_control_traj_batch = []
         updated_pred_state_traj_batch = []
         updated_pred_lam_traj_batch = []
+        # this is for warm start for the next iteration
+        w_opt_batch = []
         for i in range(batch_size):
             u_traj = control_traj_batch[i]
             init_state = init_state_batch[i]
 
-            # set up the oc solver
+            # step upt the oc solver
+            lbw = self.lbw
+            ubw = self.ubw
+            lbw[0:self.n_state] = DM(init_state)
+            ubw[0:self.n_state] = DM(init_state)
             oc_para = vertcat(u_traj.flatten(), lcs_theta)
-            self.lbw[0:self.n_state] = DM(init_state)
-            self.ubw[0:self.n_state] = DM(init_state)
-            self.w0[0:self.n_state] = DM(init_state)
+            # warm start
+            if not self.warm_start:
+                init_w = self.w0
+                init_w[0:self.n_state] = DM(init_state)
+            else:
+                init_w=self.warm_start[i]
+                init_w[0:self.n_state] = DM(init_state)
+
 
             # Solve the NLP
-            sol = self.oc_solver(x0=self.w0, lbx=self.lbw, ubx=self.ubw, lbg=self.lbg, ubg=self.ubg, p=oc_para)
+            sol = self.oc_solver(x0=init_w, lbx=lbw, ubx=ubw, lbg=self.lbg, ubg=self.ubg, p=oc_para)
             w_opt = sol['x']
+            w_opt_batch += [w_opt]
 
             # extract the optimal control and state
             sol_traj = w_opt[0:self.control_horizon * (self.n_state + self.n_control + self.n_lam)].reshape(
@@ -1498,5 +1517,6 @@ class LCS_evaluation:
             updated_pred_state_traj_batch += [x_traj.full()]
             updated_pred_lam_traj_batch += [lam_traj.full()]
 
+        self.warm_start = w_opt_batch
 
-        return updated_control_traj_batch, model_cost_batch
+        return updated_control_traj_batch
