@@ -58,7 +58,7 @@ init_state_batch = np.random.randn(traj_count, n_state)
 control_traj_batch = TD.randomControlTraj(traj_count, control_horizon, n_control)
 
 
-# =============================== compute the true optimal cost (for reference, this is not always correct)
+# =============================== compute the true optimal cost (for reference)
 true_sys_oc_solver = TD.LCS_MPC(A, B, C, D, E, F, lcp_offset)
 true_sys_oc_solver.oc_setup(control_horizon)
 true_sys_opt_control_traj_batch = []
@@ -71,7 +71,7 @@ true_sys_opt_cost_batch = evaluator.computeCost(true_sys_opt_control_traj_batch,
 
 # ================= starting the data-driven model learning process
 control_cost_trace = []
-for control_iter in range(500):
+for control_iter in range(100):
 
     # # ============================= random the initial condition
     init_state_batch = np.random.randn(traj_count, n_state)
@@ -86,7 +86,7 @@ for control_iter in range(500):
     print('======================================================================')
     print('| Control Iter:', control_iter)
     if control_iter < 2:
-        lcs_max_iter = 1000
+        lcs_max_iter = 2000
     else:
         lcs_max_iter = 500  # why: because the lcs_learner is always warm started with the previous control iteration
     TD.LCSLearningRegression(lcs_learner, optimizier, control_traj_batch, true_state_traj_batch, max_iter=lcs_max_iter,
@@ -118,8 +118,6 @@ learned_lcs_mats = lcs_learner.computeLCSMats(compact=False)
 np.save('results',
         {
             'control_cost_trace': control_cost_trace,
-            'control_traj_batch': control_traj_batch,
-            'init_state_batch': init_state_batch,
             'learned_lcs_mats': learned_lcs_mats,
             'Q': Q,
             'QN': QN,
