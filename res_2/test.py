@@ -67,19 +67,21 @@ for i in range(traj_count):
     sol = learned_lcs_oc_solver.mpc(init_state_batch[i], Q, R, QN)
     learned_lcs_opt_control_traj_batch += [sol['control_traj_opt']]
 
+# ==============implement the optimal control inputs from the learned lcs to the real system
 true_sys_state_traj_batch, true_sys_lam_traj_batch = true_sys.sim_dyn(init_state_batch,
                                                                       learned_lcs_opt_control_traj_batch)
 true_sys_cost_batch = evaluator.computeCost(learned_lcs_opt_control_traj_batch, true_sys_state_traj_batch)
 
+# plot
 for true_sys_trajectory in true_sys_state_traj_batch:
     plt.plot(true_sys_trajectory)
-
 plt.ylabel('state of true system')
 plt.xlabel('time')
 plt.show()
 print('learned control cost:', np.mean(true_sys_cost_batch))
 
+# plot the loss
 plt.plot(control_cost_trace)
-plt.ylabel('iteration')
-plt.xlabel('control cost of true system')
+plt.xlabel('iteration')
+plt.ylabel('control cost of true system')
 plt.show()
