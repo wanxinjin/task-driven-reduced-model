@@ -843,6 +843,32 @@ class LCS_learner_regression:
                     'lcp_offset': lcp_offset,
                     }
 
+    def dyn_step(self, x_batch, u_batch):
+        self.differetiable()
+
+
+
+
+        batch_size = len(x_batch)
+        next_x_batch = []
+        lam_batch = []
+        for i in range(batch_size):
+            x = x_batch[i]
+            u = u_batch[i]
+            lcp_data_theta = np.hstack((x, u, self.val_lcp_theta))
+
+            # compute the lam value
+            sol = self.lcp_Solver(lbx=0.0, lbg=0.0, p=lcp_data_theta)
+            lam = sol['x'].full().flatten()
+            # compute the next state
+            next_x = self.dyn_fn(x, u, lam, self.val_dyn_theta).full().flatten()
+
+            # store
+            next_x_batch += [next_x]
+            lam_batch += [lam]
+
+        return next_x_batch, lam_batch
+
 
 # class for learning LCS from the hybrid data (backup)
 class LCS_learner_regression_backup:
@@ -1783,7 +1809,221 @@ class LCS_evaluation2:
         return updated_control_traj_batch
 
 
-# utility function
+# compute the gradient of the control input using the recovery matrix (Jin. et al. IJRR)
+
+
+# evaluation object to evaluate the learned lcs model using a control cost function
+# random_initial condition
+class LCS_evaluation_MPC:
+    def __init__(self, lcs_learner):
+        self.name = 'lcs evaluation'
+
+        # define the system variables
+        self.n_state = lcs_learner.n_state
+        self.n_control = lcs_learner.n_control
+        self.n_lam = lcs_learner.n_lam
+
+        # define the system variables
+        self.x = SX.sym('x', self.n_state)
+        self.u = SX.sym('u', self.n_control)
+        self.lam = SX.sym('lam', self.n_lam)
+
+        # define the system matrices
+        self.A = SX.sym('A', self.n_state, self.n_state)
+        self.B = SX.sym('B', self.n_state, self.n_control)
+        self.C = SX.sym('C', self.n_state, self.n_lam)
+
+        self.D = SX.sym('D', self.n_lam, self.n_state)
+        self.E = SX.sym('E', self.n_lam, self.n_control)
+        self.F = SX.sym('F', self.n_lam, self.n_lam)
+        self.lcp_offset = SX.sym('lcp_offset', self.n_lam)
+
+        self.lcs_theta = vertcat(vec(self.A), vec(self.B), vec(self.C),
+                                 vec(self.D), vec(self.E), vec(self.F),
+                                 vec(self.lcp_offset))
+
+        # define the dynamics
+        self.f = self.A @ self.x + self.B @ self.u + self.C @ self.lam
+
+    def setCostFunction(self, Q, R, QN):
+        self.Q = DM(Q)
+        self.R = DM(R)
+        self.QN = DM(QN)
+
+        # define the control cost function
+        self.path_cost = dot(self.x, self.Q @ self.x) + dot(self.u, self.R @ self.u)
+        self.final_cost = dot(self.x, self.QN @ self.x)
+        self.path_cost_fn = Function('path_cost_fn', [self.x, self.u], [self.path_cost])
+        self.final_cost_fn = Function('final_cost_fn', [self.x], [self.final_cost])
+
+    def computeCost(self, control_traj_batch, state_traj_batch):
+        cost_batch = []
+        batch_size = len(control_traj_batch)
+        for i in range(batch_size):
+            u_traj = control_traj_batch[i]
+            x_traj = state_traj_batch[i]
+
+            cost = 0.0
+            for t in range(self.mpc_horizon):
+                curr_x = x_traj[t]
+                curr_u = u_traj[t]
+                cost += self.path_cost_fn(curr_x, curr_u)
+
+            cost += self.final_cost_fn(x_traj[-1])
+
+            cost_batch += [cost]
+
+        return cost_batch
+
+    def differentiable(self):
+        # define the gradient of lam with respect to lcp_theta
+        self.dist = self.D @ self.x + self.E @ self.u + self.F @ self.lam + self.lcp_offset
+        g = diag(self.lam) @ self.dist
+        dg_dlam = jacobian(g, self.lam)
+        dg_dx = jacobian(g, self.x)
+        dg_du = jacobian(g, self.u)
+        dlam_dx = -inv(dg_dlam) @ dg_dx
+        dlam_du = -inv(dg_dlam) @ dg_du
+
+        # differentiate
+        df_dx = jacobian(self.f, self.x) + jacobian(self.f, self.lam) @ dlam_dx
+        df_du = jacobian(self.f, self.u) + jacobian(self.f, self.lam) @ dlam_du
+
+        self.dfdx_fn = Function('dfdx_fn', [self.x, self.u, self.lam, self.lcs_theta], [df_dx])
+        self.dfdu_fn = Function('dfdx_fn', [self.x, self.u, self.lam, self.lcs_theta], [df_du])
+
+        # compute the gradient of the cost function
+        self.dcdx = jacobian(self.path_cost, self.x).T
+        self.dcdu = jacobian(self.path_cost, self.u).T
+        self.dhdx = jacobian(self.final_cost, self.x).T
+
+        # establish the functions for the above gradient
+        self.dcdx_fn = Function('dcdx_fn', [self.x, self.u], [self.dcdx])
+        self.dcdu_fn = Function('dcdu_fn', [self.x, self.u], [self.dcdu])
+        self.dhdx_fn = Function('dhdx_fn', [self.x], [self.dhdx])
+
+    def initializeMPC(self, mpc_horizon):
+
+        self.mpc_horizon = mpc_horizon
+
+        # Start with an empty NLP
+        w = []
+        w0 = []
+        lbw = []
+        ubw = []
+        J = 0
+        g = []
+        lbg = []
+        ubg = []
+
+        lcs_theta = vertcat(vec(self.A), vec(self.B), vec(self.C),
+                            vec(self.D), vec(self.E), vec(self.F),
+                            vec(self.lcp_offset))
+
+        # "Lift" initial conditions
+        Xk = casadi.SX.sym('X0', self.n_state)
+        w += [Xk]
+        lbw += np.zeros(self.n_state).tolist()
+        ubw += np.zeros(self.n_state).tolist()
+        w0 += np.zeros(self.n_state).tolist()
+
+        # formulate the NLP
+        for k in range(self.mpc_horizon):
+            # New NLP variable for the control
+            Uk = casadi.SX.sym('U_' + str(k), self.n_control)
+            w += [Uk]
+            lbw += self.n_control * [-inf]
+            ubw += self.n_control * [inf]
+            w0 += self.n_control * [0.]
+
+            # new NLP variable for the complementarity variable
+            Lamk = casadi.SX.sym('lam' + str(k), self.n_lam)
+            w += [Lamk]
+            lbw += self.n_lam * [0.]
+            ubw += self.n_lam * [inf]
+            w0 += self.n_lam * [0.]
+
+            # Add complementarity equation
+            g += [self.D @ Xk + self.E @ Uk + self.F @ Lamk + self.lcp_offset]
+            lbg += self.n_lam * [0.]
+            ubg += self.n_lam * [inf]
+
+            g += [casadi.dot(self.D @ Xk + self.E @ Uk + self.F @ Lamk + self.lcp_offset, Lamk)]
+            lbg += [0.]
+            ubg += [0.]
+
+            # Integrate till the end of the interval
+            Xnext = self.A @ Xk + self.B @ Uk + self.C @ Lamk
+
+            Ck = dot(Xk, self.Q @ Xk) + dot(Uk, self.R @ Uk)
+            J = J + Ck
+
+            # New NLP variable for state at end of interval
+            Xk = casadi.SX.sym('X_' + str(k + 1), self.n_state)
+            w += [Xk]
+            lbw += self.n_state * [-inf]
+            ubw += self.n_state * [inf]
+            w0 += self.n_state * [0.]
+
+            # Add constraint for the dynamics
+            g += [Xnext - Xk]
+            lbg += self.n_state * [0.]
+            ubg += self.n_state * [0.]
+
+        # Add the final cost
+        J = J + dot(Xk, self.QN @ Xk)
+
+        # Create an NLP solver and solve
+        opts = {'ipopt.print_level': 0, 'ipopt.sb': 'yes', 'print_time': 0}
+        prob = {'f': J, 'x': casadi.vertcat(*w), 'g': casadi.vertcat(*g), 'p': lcs_theta}
+        self.oc_solver = casadi.nlpsol('solver', 'ipopt', prob, opts)
+
+        self.lbw = DM(lbw)
+        self.ubw = DM(ubw)
+        self.lbg = DM(lbg)
+        self.ubg = DM(ubg)
+        self.w0 = DM(w0)
+
+    def mpc(self, lcs_learner, state_batch):
+
+        # take out the current lcs system parameter
+        lcs_theta = lcs_learner.computeLCSMats()
+
+
+
+
+        # do the one step mpc
+        state_batch = list(state_batch)
+        batch_size = len(state_batch)
+        control_batch = []
+        for i in range(batch_size):
+            state = state_batch[i]
+            # set the optimal control bounds
+            lbw = self.lbw
+            ubw = self.ubw
+            init_w = self.w0
+            lbw[0:self.n_state] = DM(state)
+            ubw[0:self.n_state] = DM(state)
+            init_w[0:self.n_state] = DM(state)
+
+            # set the optimal control parameter
+            oc_parameters = DM(lcs_theta)
+            sol = self.oc_solver(x0=self.w0, lbx=self.lbw, ubx=self.ubw, lbg=self.lbg, ubg=self.ubg, p=oc_parameters)
+            w_opt = sol['x']
+
+            # extract the optimal control and state
+            sol_traj = w_opt[0:self.mpc_horizon * (self.n_state + self.n_control + self.n_lam)].reshape(
+                (self.n_state + self.n_control + self.n_lam, -1))
+            x_traj = casadi.horzcat(sol_traj[0:self.n_state, :],
+                                    w_opt[self.mpc_horizon * (self.n_state + self.n_control + self.n_lam):]).T.full()
+            u_traj = sol_traj[self.n_state:self.n_state + self.n_control, :].T.full()
+            lam_traj = sol_traj[self.n_state + self.n_control:, :].T.full()
+
+            control_batch += [w_opt[self.n_state:self.n_state + self.n_control].full().flatten()]
+
+        return control_batch
+
+
 def find_closest(candidate_rows, query):
     n = len(candidate_rows)
     min_distance = inf
@@ -1796,3 +2036,17 @@ def find_closest(candidate_rows, query):
             closest_index = i
 
     return closest_index
+
+
+def dataReorgnize(batch_traj):
+    batch_size = len(batch_traj[0])
+    traj_horizon = len(batch_traj)
+
+    traj_batch = []
+    for batch_i in range(batch_size):
+        traj = []
+        for t in range(traj_horizon):
+            traj += [batch_traj[t][batch_i]]
+        traj = np.array(traj)
+        traj_batch+=[traj]
+    return traj_batch
