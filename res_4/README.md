@@ -1,3 +1,3 @@
-task-driven reduced-order model 
-under the mpc control setting
+task-driven full order lcs
+the mpc control setting
 

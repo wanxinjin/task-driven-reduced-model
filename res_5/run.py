@@ -39,10 +39,10 @@ QN = Q
 R = np.eye(n_control)
 
 # ============================= establish the lcs learner (automatically initialized)
-reduced_n_lam = n_lam
-lcs_learner = TD.LCS_learner_regression(n_state, n_control, n_lam=reduced_n_lam, stiffness=0)
-# lcs_learner.val_lcp_theta = 0 * true_lcp_theta + 1 * np.random.randn(true_lcp_theta.size)
-# lcs_learner.val_lcp_theta = 0 * true_lcp_theta + 1 * np.random.randn(lcs_learner.size)
+reduced_n_lam = 2
+lcs_learner = TD.LCS_learner_regression(n_state, n_control, n_lam=reduced_n_lam, stiffness=1)
+lcs_learner.val_lcp_theta =  0.1 * np.random.randn(lcs_learner.n_lcp_theta)
+
 
 # ============================= initialize the optimizer
 optimizier = opt.Adam()
@@ -55,6 +55,10 @@ controller_evaluator.setCostFunction(Q, R, QN)
 controller_evaluator.initializeMPC(mpc_horizon)
 
 # # ============================= compute the true optimal cost (for reference, this is not always correct)
+mpc_horizon = 5
+true_controller_evaluator = TD.MPC_Controller(true_sys)
+true_controller_evaluator.setCostFunction(Q, R, QN)
+true_controller_evaluator.initializeMPC(mpc_horizon)
 traj_count = 30
 init_state_batch = np.random.randn(traj_count, n_state)
 state_batch_traj = [list(init_state_batch)]
@@ -62,7 +66,7 @@ control_batch_traj = []
 for t in range(control_horizon):
     # compute the control input using the current lcs learner
     st = time.time()
-    control_batch_traj += [controller_evaluator.mpc(true_sys, state_batch_traj[-1])]
+    control_batch_traj += [true_controller_evaluator.mpc(true_sys, state_batch_traj[-1])]
     # simulate to the next step
     next_state_batch, lam_batch = true_sys.dyn_step(state_batch_traj[-1], control_batch_traj[-1])
     state_batch_traj += [next_state_batch]
