@@ -846,9 +846,6 @@ class LCS_learner_regression:
     def dyn_step(self, x_batch, u_batch):
         self.differetiable()
 
-
-
-
         batch_size = len(x_batch)
         next_x_batch = []
         lam_batch = []
@@ -1099,6 +1096,99 @@ def randomControlTraj(traj_count, horizon, n_control):
 
 
 # learn a lcs model from the sampled data using regression algorithms
+def LCSRegressionBuffer(lcs_learner, optimizier,
+                        curr_control_traj_batch, curr_true_state_traj_batch,
+                        prev_control_traj_batch, prev_true_state_traj_batch,
+                        buffer_ratio=0.5,
+                        minibatch_size=200, max_iter=5000, print_level=0):
+    # converting the data form
+    curr_batch_size = len(curr_control_traj_batch)
+    curr_train_u_batch = []
+    curr_train_x_batch = []
+    curr_train_x_next_batch = []
+    for i in range(curr_batch_size):
+        curr_train_u_batch += [curr_control_traj_batch[i]]
+        curr_train_x_batch += [curr_true_state_traj_batch[i][0:-1]]
+        curr_train_x_next_batch += [curr_true_state_traj_batch[i][1:]]
+    curr_train_u_batch = np.vstack(curr_train_u_batch)
+    curr_train_x_next_batch = np.vstack(curr_train_x_next_batch)
+    curr_train_x_batch = np.vstack(curr_train_x_batch)
+    curr_train_data_size = curr_train_u_batch.shape[0]
+    curr_minibatch_size = int((1 - buffer_ratio) * minibatch_size)
+
+    # converting the data form
+    prev_batch_size = len(prev_control_traj_batch)
+    if prev_batch_size is not 0:
+        prev_train_u_batch = []
+        prev_train_x_batch = []
+        prev_train_x_next_batch = []
+        for i in range(prev_batch_size):
+            prev_train_u_batch += [prev_control_traj_batch[i]]
+            prev_train_x_batch += [prev_true_state_traj_batch[i][0:-1]]
+            prev_train_x_next_batch += [prev_true_state_traj_batch[i][1:]]
+        prev_train_u_batch = np.vstack(prev_train_u_batch)
+        prev_train_x_next_batch = np.vstack(prev_train_x_next_batch)
+        prev_train_x_batch = np.vstack(prev_train_x_batch)
+        prev_train_data_size = prev_train_u_batch.shape[0]
+        prev_minibatch_size = minibatch_size - curr_minibatch_size
+    else:
+        curr_minibatch_size = minibatch_size
+        prev_minibatch_size = 0
+
+    print('current_data points:', curr_minibatch_size, '| history data points:', prev_minibatch_size)
+
+    for k in range(max_iter):
+        # mini batch dataset for current training data set
+        curr_shuffle_index = np.random.permutation(curr_train_data_size)[0:curr_minibatch_size]
+        curr_x_minibatch = curr_train_x_batch[curr_shuffle_index]
+        curr_u_minibatch = curr_train_u_batch[curr_shuffle_index]
+        curr_x_next_minibatch = curr_train_x_next_batch[curr_shuffle_index]
+        # mini batch dataset for the previous training data set
+        if prev_batch_size is not 0:
+            prev_shuffle_index = np.random.permutation(prev_train_data_size)[0:prev_minibatch_size]
+            prev_x_minibatch = prev_train_x_batch[prev_shuffle_index]
+            prev_u_minibatch = prev_train_u_batch[prev_shuffle_index]
+            prev_x_next_minibatch = prev_train_x_next_batch[prev_shuffle_index]
+            x_minibatch = np.vstack((curr_x_minibatch, prev_x_minibatch))
+            u_minibatch = np.vstack((curr_u_minibatch, prev_u_minibatch))
+            x_next_minibatch = np.vstack((curr_x_next_minibatch, prev_x_next_minibatch))
+        else:
+            x_minibatch = curr_x_minibatch
+            u_minibatch = curr_u_minibatch
+            x_next_minibatch = curr_x_next_minibatch
+
+        # compute the lambda batch
+        lam_opt_mini_batch, loss_opt_mini_batch = lcs_learner.compute_lambda(x_minibatch, u_minibatch)
+
+        # regression for the dynamics
+        dyn_loss_opt = lcs_learner.dyn_regression(x_minibatch, u_minibatch, lam_opt_mini_batch, x_next_minibatch)
+
+        # compute the gradient
+        dlcp_theta = lcs_learner.gradient_step(x_minibatch, u_minibatch, x_next_minibatch, lam_opt_mini_batch)
+
+        # store and update
+        lcs_learner.val_lcp_theta = optimizier.step(lcs_learner.val_lcp_theta, dlcp_theta)
+
+        if print_level is not 0:
+            if k % 100 == 0:
+                # on the prediction using the current learned lcs
+                pred_x_next_batch, pred_lam_batch = lcs_learner.dyn_prediction(curr_train_x_batch, curr_train_u_batch)
+
+                # compute the prediction error
+                error_x_next_batch = pred_x_next_batch - curr_train_x_next_batch
+                relative_error = (
+                        la.norm(error_x_next_batch, axis=1) / (
+                        la.norm(curr_train_x_next_batch, axis=1) + 0.0001)).mean()
+
+                print(
+                    'lcs learning iter', k,
+                    '| loss:', dyn_loss_opt,
+                    '| grad:', norm_2(dlcp_theta),
+                    '| PRE:', relative_error,
+                )
+
+
+# learn a lcs model from the sampled data using regression algorithms without previous
 def LCSLearningRegression(lcs_learner, optimizier, control_traj_batch, true_state_traj_batch,
                           max_iter=5000, minibatch_size=100, print_level=0):
     # converting the data form
@@ -1814,7 +1904,7 @@ class LCS_evaluation2:
 
 # evaluation object to evaluate the learned lcs model using a control cost function
 # random_initial condition
-class LCS_evaluation_MPC:
+class MPC_Controller:
     def __init__(self, lcs_learner):
         self.name = 'lcs evaluation'
 
@@ -1984,13 +2074,13 @@ class LCS_evaluation_MPC:
         self.ubg = DM(ubg)
         self.w0 = DM(w0)
 
-    def mpc(self, lcs_learner, state_batch):
+    def mpc(self, lcs_learner, state_batch, lcs_theta=None):
 
         # take out the current lcs system parameter
-        lcs_theta = lcs_learner.computeLCSMats()
-
-
-
+        if lcs_theta is None:
+            lcs_theta = lcs_learner.computeLCSMats()
+        else:
+            lcs_theta=lcs_theta
 
         # do the one step mpc
         state_batch = list(state_batch)
@@ -2010,6 +2100,7 @@ class LCS_evaluation_MPC:
             oc_parameters = DM(lcs_theta)
             sol = self.oc_solver(x0=self.w0, lbx=self.lbw, ubx=self.ubw, lbg=self.lbg, ubg=self.ubg, p=oc_parameters)
             w_opt = sol['x']
+            self.w0 = w_opt
 
             # extract the optimal control and state
             sol_traj = w_opt[0:self.mpc_horizon * (self.n_state + self.n_control + self.n_lam)].reshape(
@@ -2048,5 +2139,5 @@ def dataReorgnize(batch_traj):
         for t in range(traj_horizon):
             traj += [batch_traj[t][batch_i]]
         traj = np.array(traj)
-        traj_batch+=[traj]
+        traj_batch += [traj]
     return traj_batch

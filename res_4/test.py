@@ -31,11 +31,11 @@ true_lcp_theta = vertcat(vec(D), vec(E), vec(G), vec(H), vec(lcp_offset)).full()
 true_dyn_theta = vertcat(vec(A), vec(B), vec(C)).full().flatten()
 true_theta = vertcat(true_dyn_theta, true_lcp_theta).full().flatten()
 
-
 # ==============================    load the learned results
 load = np.load('results.npy', allow_pickle=True).item()
 control_cost_trace = load['control_cost_trace']
 learned_lcs_mats = load['learned_lcs_mats']
+learned_lcs_theta = load['learned_lcs_theta']
 learned_A = learned_lcs_mats['A']
 learned_B = learned_lcs_mats['B']
 learned_C = learned_lcs_mats['C']
@@ -49,44 +49,46 @@ Q = load['Q']
 R = load['R']
 QN = load['QN']
 
-
-# ============================= establish the lcs learner (automatically initialized)
-reduced_n_lam = 2
-lcs_learner = TD.LCS_learner_regression(n_state, n_control, n_lam=reduced_n_lam, stiffness=0)
-lcs_learner.val_lcp_theta = 1. * np.random.randn(lcs_learner.n_lcp_theta)
-print('n_lam for the learner:', lcs_learner.n_lam)
-
-
-# ============================= initialize an evaluator for the learned system
-evaluator = TD.LCS_evaluation(lcs_learner)
-evaluator.setCostFunction(Q, R, QN, control_horizon)
-evaluator.differentiable()
-
-# =============================== compute the optimal control inputs using learned lcs
-traj_count = 50
-init_state_batch = np.random.randn(traj_count, n_state)
-learned_lcs_oc_solver = TD.LCS_MPC(learned_A, learned_B, learned_C, learned_D, learned_E, learned_F, learned_lcp_offset)
-learned_lcs_oc_solver.oc_setup(control_horizon)
-learned_lcs_opt_control_traj_batch = []
-for i in range(traj_count):
-    sol = learned_lcs_oc_solver.mpc(init_state_batch[i], Q, R, QN)
-    learned_lcs_opt_control_traj_batch += [sol['control_traj_opt']]
-
-# ==============implement the optimal control inputs from the learned lcs to the real system
-true_sys_state_traj_batch, true_sys_lam_traj_batch = true_sys.sim_dyn(init_state_batch,
-                                                                      learned_lcs_opt_control_traj_batch)
-true_sys_cost_batch = evaluator.computeCost(learned_lcs_opt_control_traj_batch, true_sys_state_traj_batch)
-
-# plot
-for true_sys_trajectory in true_sys_state_traj_batch:
-    plt.plot(true_sys_trajectory)
-plt.ylabel('state of true system')
-plt.xlabel('time')
-plt.show()
-print('learned control cost:', np.mean(true_sys_cost_batch))
-
 # plot the loss
 plt.plot(control_cost_trace)
 plt.xlabel('iteration')
 plt.ylabel('control cost of true system')
 plt.show()
+
+# ============================= establish the lcs learner (automatically initialized)
+reduced_n_lam = load['reduced_n_lam']
+print('n_lam for the learner:', reduced_n_lam)
+
+lcs_learner = TD.LCS_learner_regression(n_state, n_control, n_lam=reduced_n_lam, stiffness=0)
+
+# ============================= initialize an evaluator for the learned system
+mpc_horizon = load['mpc_horizon']
+controller_evaluator = TD.MPC_Controller(lcs_learner)
+controller_evaluator.setCostFunction(Q, R, QN)
+controller_evaluator.initializeMPC(mpc_horizon)
+
+# # ============================= compute the true optimal cost (for reference, this is not always correct)
+traj_count = 30
+init_state_batch = np.random.randn(traj_count, n_state)
+state_batch_traj = [list(init_state_batch)]
+control_batch_traj = []
+for t in range(control_horizon):
+    # compute the control input using the current lcs learner
+    control_batch_traj += [controller_evaluator.mpc(None, state_batch_traj[-1], learned_lcs_theta)]
+    # simulate to the next step
+    next_state_batch, lam_batch = true_sys.dyn_step(state_batch_traj[-1], control_batch_traj[-1])
+    state_batch_traj += [next_state_batch]
+# reorganize the data format
+control_traj_batch = TD.dataReorgnize(control_batch_traj)
+state_traj_batch = TD.dataReorgnize(state_batch_traj)
+true_sys_opt_cost_batch = controller_evaluator.computeCost(control_traj_batch, state_traj_batch)
+print('control cost on real system', np.mean(true_sys_opt_cost_batch))
+
+
+# plot
+for sys_trajectory in state_traj_batch:
+    plt.plot(sys_trajectory)
+plt.ylabel('state of true system')
+plt.xlabel('time')
+plt.show()
+
