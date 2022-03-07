@@ -846,6 +846,10 @@ class LCS_learner_regression:
     def dyn_step(self, x_batch, u_batch):
         self.differetiable()
 
+        if type(x_batch) is np.ndarray:
+            x_batch = [x_batch]
+            u_batch = [u_batch]
+
         batch_size = len(x_batch)
         next_x_batch = []
         lam_batch = []
@@ -865,6 +869,18 @@ class LCS_learner_regression:
             lam_batch += [lam]
 
         return next_x_batch, lam_batch
+
+    def dynamics_step(self, curr_x, curr_u):
+        self.differetiable()
+
+        lcp_data_theta = np.hstack((curr_x, curr_u, self.val_lcp_theta))
+        # compute the lam value
+        sol = self.lcp_Solver(lbx=0.0, lbg=0.0, p=lcp_data_theta)
+        curr_lam = sol['x'].full().flatten()
+        # compute the next state
+        next_x = self.dyn_fn(curr_x, curr_u, curr_lam, self.val_dyn_theta).full().flatten()
+
+        return next_x, curr_lam
 
 
 # class for learning LCS from the hybrid data (backup)
@@ -1954,7 +1970,8 @@ class MPC_Controller:
             x_traj = state_traj_batch[i]
 
             cost = 0.0
-            for t in range(self.mpc_horizon):
+            control_horizon = u_traj.shape[0]
+            for t in range(control_horizon):
                 curr_x = x_traj[t]
                 curr_u = u_traj[t]
                 cost += self.path_cost_fn(curr_x, curr_u)
@@ -2080,7 +2097,7 @@ class MPC_Controller:
         if lcs_theta is None:
             lcs_theta = lcs_learner.computeLCSMats()
         else:
-            lcs_theta=lcs_theta
+            lcs_theta = lcs_theta
 
         # do the one step mpc
         state_batch = list(state_batch)
@@ -2113,6 +2130,32 @@ class MPC_Controller:
             control_batch += [w_opt[self.n_state:self.n_state + self.n_control].full().flatten()]
 
         return control_batch
+
+    def mpc_step(self, lcs_learner, curr_state, lcs_theta=None):
+
+        # take out the current lcs system parameter
+        if lcs_theta is None:
+            lcs_theta = lcs_learner.computeLCSMats()
+        else:
+            lcs_theta = lcs_theta
+
+        # set the optimal control bounds
+        lbw = self.lbw
+        ubw = self.ubw
+        init_w = self.w0
+        lbw[0:self.n_state] = DM(curr_state)
+        ubw[0:self.n_state] = DM(curr_state)
+        init_w[0:self.n_state] = DM(curr_state)
+
+        # set the optimal control parameter
+        oc_parameters = DM(lcs_theta)
+        sol = self.oc_solver(x0=self.w0, lbx=self.lbw, ubx=self.ubw, lbg=self.lbg, ubg=self.ubg, p=oc_parameters)
+        w_opt = sol['x']
+        self.w0 = w_opt
+
+        curr_control = w_opt[self.n_state:self.n_state + self.n_control].full().flatten()
+
+        return curr_control
 
 
 def find_closest(candidate_rows, query):
