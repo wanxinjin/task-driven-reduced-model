@@ -87,7 +87,7 @@ prev_state_traj_batch = []
 for control_iter in range(20):
 
     # # ============================= random the initial condition
-    traj_count = 30
+    traj_count = 50
     # np.random.seed(10)
     init_state_batch = np.random.randn(traj_count, n_state)
 
@@ -125,8 +125,8 @@ for control_iter in range(20):
     TD.LCSRegressionBuffer(lcs_learner, optimizier,
                            control_traj_batch, state_traj_batch,
                            prev_control_traj_batch, prev_state_traj_batch,
-                           buffer_ratio=0.9,
-                           max_iter=200,
+                           buffer_ratio=0.8,
+                           max_iter=500,
                            minibatch_size=200,
                            print_level=1)
 
