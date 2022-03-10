@@ -83,6 +83,8 @@ for control_iter in range(500):
         lcs_max_iter = 1000
     else:
         lcs_max_iter = 500  # why: because the lcs_learner is always warm started with the previous control iteration
+
+
     TD.LCSLearningRegression(lcs_learner, optimizier, control_traj_batch, true_state_traj_batch, max_iter=lcs_max_iter,
                              print_level=1)
 

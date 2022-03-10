@@ -1,8 +1,6 @@
 import matplotlib.pyplot as plt
-
 import lcs.optim as opt
 import lcs.task_driven as TD
-import numpy as np
 from casadi import *
 import time
 
@@ -33,37 +31,35 @@ Q = 2 * np.eye(n_state)
 QN = Q
 R = np.eye(n_control)
 
-# print
-print('the true system n_dim:', n_lam)
-
 # define the true lcs system
-true_sys = TD.LCS_learner_regression(n_state, n_control, n_lam, A, B, C, D, E, G, H, lcp_offset, stiffness=0)
+true_lcs = TD.LCS_learner_regression(n_state, n_control, n_lam, A, B, C, D, E, G, H, lcp_offset, stiffness=0)
+print('n_lam for the true system:', true_lcs)
 
 # # ============================= define the ture mpc controller for the true system
+true_mpc = TD.MPC_Controller(true_lcs)
+true_mpc.set_cost_function(Q, R, QN)
 mpc_horizon = 5
-true_mpc = TD.MPC_Controller(true_sys)
-true_mpc.setCostFunction(Q, R, QN)
-true_mpc.initializeMPC(mpc_horizon)
+true_mpc.initialize_mpc(mpc_horizon)
 
 # =========================== use the true mpc to simulate on the true lcs system
-traj_count = 30
+traj_count = 10
 init_state_batch = np.random.randn(traj_count, n_state)
-true_state_traj_batch = []
-true_control_traj_batch = []
+state_traj_batch = []
+control_traj_batch = []
 for i in range(traj_count):
     true_state_traj = [init_state_batch[i]]
     true_control_traj = []
     for t in range(control_horizon):
         # compute the current control input
-        true_control_traj += [true_mpc.mpc_step(true_sys, true_state_traj[-1])]
+        true_control_traj += [true_mpc.mpc_step(true_lcs, true_state_traj[-1])]
         # compute the true state
-        true_next_state, true_curr_lam = true_sys.dynamics_step(true_state_traj[-1], true_control_traj[-1])
+        true_next_state, true_curr_lam = true_lcs.dynamics_step(true_state_traj[-1], true_control_traj[-1])
         true_state_traj += [true_next_state]
     # combine them together
-    true_state_traj_batch += [np.array(true_state_traj)]
-    true_control_traj_batch += [np.array(true_control_traj)]
+    state_traj_batch += [np.array(true_state_traj)]
+    control_traj_batch += [np.array(true_control_traj)]
 # compute the current control cost
-true_opt_cost_batch = true_mpc.computeCost(true_control_traj_batch, true_state_traj_batch)
+true_opt_cost_batch = true_mpc.computeCost(control_traj_batch, state_traj_batch)
 print('True_sys optimal cost (for reference):', np.mean(true_opt_cost_batch))
 
 # ============================= establish the lcs learner (automatically initialized)
@@ -101,7 +97,7 @@ for control_iter in range(20):
             # compute the current control input
             control_traj += [learner_mpc.mpc_step(lcs_learner, state_traj[-1])]
             # compute the true state
-            next_state, curr_lam = true_sys.dynamics_step(state_traj[-1], control_traj[-1])
+            next_state, curr_lam = true_lcs.dynamics_step(state_traj[-1], control_traj[-1])
             state_traj += [next_state]
         # combine them together
         state_traj_batch += [np.array(state_traj)]

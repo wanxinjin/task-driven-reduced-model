@@ -215,6 +215,214 @@ class LCS_learner:
         return x_next_batch, lam_opt_batch
 
 
+# class for learning LCS from the hybrid data
+class LCS_learner_backup:
+    def __init__(self, n_state, n_control, n_lam,
+                 A=None, B=None, C=None, D=None, E=None, G=None, H=None, lcp_offset=None,
+                 stiffness=0.):
+        self.n_lam = n_lam
+        self.n_state = n_state
+        self.n_control = n_control
+
+        self.lam = SX.sym('lam', self.n_lam)
+        self.x = SX.sym('x', self.n_state)
+        self.u = SX.sym('u', self.n_control)
+
+        self.theta = []
+
+        if A is None:
+            self.A = SX.sym('A', self.n_state, self.n_state)
+            self.theta += [vec(self.A)]
+        else:
+            self.A = DM(A)
+
+        if B is None:
+            self.B = SX.sym('B', self.n_state, self.n_control)
+            self.theta += [vec(self.B)]
+        else:
+            self.B = DM(B)
+
+        if C is None:
+            self.C = SX.sym('C', self.n_state, self.n_lam)
+            self.theta += [vec(self.C)]
+        else:
+            self.C = DM(C)
+
+        if D is None:
+            self.D = SX.sym('D', self.n_lam, self.n_state)
+            self.theta += [vec(self.D)]
+        else:
+            self.D = DM(D)
+
+        if E is None:
+            self.E = SX.sym('E', self.n_lam, self.n_control)
+            self.theta += [vec(self.E)]
+        else:
+            self.E = DM(E)
+
+        if G is None:
+            self.G = SX.sym('G', self.n_lam, self.n_lam)
+            self.theta += [vec(self.G)]
+        else:
+            self.G = DM(G)
+
+        if H is None:
+            self.H = SX.sym('H', self.n_lam, self.n_lam)
+            self.theta += [vec(self.H)]
+        else:
+            self.H = DM(H)
+
+        if lcp_offset is None:
+            self.lcp_offset = SX.sym('lcp_offset', self.n_lam)
+            self.theta += [vec(self.lcp_offset)]
+        else:
+            self.lcp_offset = DM(lcp_offset)
+
+        self.theta = vcat(self.theta)
+        self.n_theta = self.theta.numel()
+
+        self.F = stiffness * np.eye(self.n_lam) + self.G @ self.G.T + self.H - self.H.T
+        self.F_fn = Function('F_fn', [self.theta], [self.F])
+        self.D_fn = Function('D_fn', [self.theta], [self.D])
+        self.E_fn = Function('E_fn', [self.theta], [self.E])
+        self.G_fn = Function('G_fn', [self.theta], [self.G])
+        self.H_fn = Function('H_fn', [self.theta], [self.H])
+        self.A_fn = Function('A_fn', [self.theta], [self.A])
+        self.B_fn = Function('B_fn', [self.theta], [self.B])
+        self.C_fn = Function('C_fn', [self.theta], [self.C])
+        self.lcp_offset_fn = Function('lcp_offset_fn', [self.theta], [self.lcp_offset])
+        # self.dyn_offset_fn = Function('dyn_offset_fn', [self.theta], [self.dyn_offset])
+
+    def differetiable(self, gamma=1e-3, epsilon=0.5):
+
+        # define the dynamics loss
+        self.x_next = SX.sym('x_next', self.n_state)
+        data = vertcat(self.x, self.u, self.x_next)
+        # self.dyn = self.A @ self.x + self.B @ self.u + self.C @ self.lam + self.dyn_offset
+        self.dyn = self.A @ self.x + self.B @ self.u + self.C @ self.lam
+        dyn_loss = dot(self.dyn - self.x_next, self.dyn - self.x_next)
+
+        # lcp loss
+        self.dist = self.D @ self.x + self.E @ self.u + self.F @ self.lam + self.lcp_offset
+        self.phi = SX.sym('phi', self.n_lam)
+        lcp_loss = dot(self.lam, self.phi) + 1 / gamma * dot(self.phi - self.dist,
+                                                             self.phi - self.dist)
+
+        # total loss
+        # loss = (1 - epsilon) * dyn_loss + epsilon * lcp_loss
+        dyn_loss + lcp_loss / epsilon
+        loss = dot(self.dyn[2:4] - self.x_next[2:4], self.dyn[2:4] - self.x_next[2:4]) + lcp_loss / epsilon
+        # loss = (dyn_loss + lcp_loss / epsilon) / (0.5+dot(self.x_next, self.x_next))
+
+        # establish the qp solver
+        lam_phi = vertcat(self.lam, self.phi)
+        data_theta = vertcat(self.x, self.u, self.x_next, self.theta)
+        quadprog = {'x': vertcat(self.lam, self.phi), 'f': loss, 'p': data_theta}
+        opts = {'printLevel': 'none', }
+        self.inner_QPSolver = qpsol('inner_QPSolver', 'qpoases', quadprog, opts)
+
+        # compute the jacobian from lam to theta
+        self.loss_fn = Function('loss_fn', [data, self.theta, lam_phi], [loss])
+        self.dloss_fn = Function('dloss_fn', [data, self.theta, lam_phi], [jacobian(loss, self.theta).T])
+        self.dyn_loss_fn = Function('dyn_loss_fn', [data, self.theta, lam_phi], [dyn_loss])
+        self.lcp_loss_fn = Function('lcp_loss_fn', [data, self.theta, lam_phi], [lcp_loss])
+
+        # compute the second order derivative
+        grad_loss = jacobian(loss, lam_phi).T
+        L = diag(lam_phi) @ grad_loss
+        self.L_fn = Function('L_fn', [data, self.theta, lam_phi], [L])  # this is just for testing
+        # compute the gradient of lam_phi_opt with respect to theta
+        dL_dsol = jacobian(L, lam_phi)
+        dL_dtheta = jacobian(L, self.theta)
+        dsol_dtheta = -inv(dL_dsol) @ dL_dtheta
+        self.dsol_dtheta_fn = Function('dsol_dtheta_fn', [data, self.theta, lam_phi], [dsol_dtheta])
+        # this is just for testing
+        dloss2 = jacobian(loss, self.theta) + jacobian(loss, lam_phi) @ dsol_dtheta
+        self.dloss2_fn = Function('dloss2_fn', [data, self.theta, lam_phi], [dloss2.T])
+        # compute the second order derivative
+        dloss_dtheta = jacobian(loss, self.theta).T
+        ddloss = jacobian(dloss_dtheta, self.theta) + jacobian(dloss_dtheta, lam_phi) @ dsol_dtheta
+        self.ddloss_fn = Function('ddloss_fn', [data, self.theta, lam_phi], [ddloss])
+
+    def compute_lambda(self, x_batch, u_batch, x_next_batch, theta_val):
+
+        # prepare the data
+        batch_size = x_batch.shape[0]
+        data_batch = np.hstack((x_batch, u_batch, x_next_batch))
+        theta_val_batch = np.tile(theta_val, (batch_size, 1))
+        data_theta_batch = np.hstack((data_batch, theta_val_batch))
+
+        # compute the lam_phi solution
+        sol_batch = self.inner_QPSolver(lbx=0.0, p=data_theta_batch.T)
+        loss_opt_batch = sol_batch['f'].full().flatten()
+        lam_phi_opt_batch = sol_batch['x'].full().T
+
+        return lam_phi_opt_batch, loss_opt_batch
+
+    def gradient_step(self, x_batch, u_batch, x_next_batch, theta_val, lam_phi_opt_batch, second_order=False):
+        batch_size = x_batch.shape[0]
+        data_batch = np.hstack((x_batch, u_batch, x_next_batch))
+        theta_val_batch = np.tile(theta_val, (batch_size, 1))
+
+        # compute the gradient value
+        dtheta_batch = self.dloss_fn(data_batch.T, theta_val_batch.T, lam_phi_opt_batch.T)
+        dtheta_mean = dtheta_batch.full().mean(axis=1)
+
+        # compute the losses
+        loss_batch = self.loss_fn(data_batch.T, theta_val_batch.T, lam_phi_opt_batch.T)
+        dyn_loss_batch = self.dyn_loss_fn(data_batch.T, theta_val_batch.T, lam_phi_opt_batch.T)
+        lcp_loss_batch = self.lcp_loss_fn(data_batch.T, theta_val_batch.T, lam_phi_opt_batch.T)
+        loss_mean = loss_batch.full().mean()
+        dyn_loss_mean = dyn_loss_batch.full().mean()
+        lcp_loss_mean = lcp_loss_batch.full().mean()
+
+        dtheta_hessian = dtheta_mean
+
+        if second_order is True:
+            hessian_batch = self.ddloss_fn(data_batch.T, theta_val_batch.T, lam_phi_opt_batch.T)
+            # compute the mean hessian
+            hessian_sum = 0
+            for i in range(batch_size):
+                hessian_i = hessian_batch[:, i * self.n_theta:(i + 1) * self.n_theta]
+                hessian_sum += hessian_i
+            hessian_mean = hessian_sum / batch_size
+            damping_factor = 1
+            u, s, vh = np.linalg.svd(hessian_mean)
+            s = s + damping_factor
+            damped_hessian = u @ np.diag(s) @ vh
+            dtheta_hessian = (inv(damped_hessian) @ DM(dtheta_mean)).full().flatten()
+
+        return dtheta_mean, loss_mean, dyn_loss_mean, lcp_loss_mean, dtheta_hessian
+
+    def dyn_prediction(self, x_batch, u_batch, theta_val):
+        self.differetiable()
+
+        batch_size = x_batch.shape[0]
+        theta_val_batch = np.tile(theta_val, (batch_size, 1))
+        xu_theta_batch = np.hstack((x_batch, u_batch, theta_val_batch))
+
+        # establish the lcp solver
+        lcp_loss = dot(self.dist, self.lam)
+        xu_theta = vertcat(self.x, self.u, self.theta)
+        quadprog = {'x': self.lam, 'f': lcp_loss, 'g': self.dist, 'p': xu_theta}
+        opts = {'printLevel': 'none'}
+        lcp_Solver = qpsol('lcp_solver', 'qpoases', quadprog, opts)
+        self.lcp_fn = Function('dist_fn', [self.x, self.u, self.lam, self.theta], [self.dist, dot(self.dist, self.lam)])
+        self.lcp_dist_fn = Function('dist_fn', [self.x, self.u, self.lam, self.theta], [self.dist])
+
+        # establish the dynamics equation
+        dyn_fn = Function('dyn_fn', [self.x, self.u, self.lam, self.theta], [self.dyn])
+
+        # compute the lam_batch
+        sol_batch = lcp_Solver(lbx=0., lbg=0., p=xu_theta_batch.T)
+        lam_opt_batch = sol_batch['x'].full().T
+
+        # compute the next state batch
+        x_next_batch = dyn_fn(x_batch.T, u_batch.T, lam_opt_batch.T, theta_val_batch.T).full().T
+
+        return x_next_batch, lam_opt_batch
+
+
 # class for using a lcs to do mpc control
 class LCS_MPC:
     def __init__(self, A, B, C, D, E, F, lcp_offset):
@@ -435,6 +643,7 @@ class LCS_learner_regression:
             self.G = SX.sym('G', self.n_lam, self.n_lam)
             self.theta += [vec(self.G)]
             self.lcp_theta += [vec(self.G)]
+
         else:
             self.G = DM(G)
 
@@ -442,6 +651,7 @@ class LCS_learner_regression:
             self.H = SX.sym('H', self.n_lam, self.n_lam)
             self.theta += [vec(self.H)]
             self.lcp_theta += [vec(self.H)]
+
         else:
             self.H = DM(H)
 
@@ -462,14 +672,14 @@ class LCS_learner_regression:
         self.n_dyn_theta = self.dyn_theta.numel()
 
         self.F = stiffness * np.eye(self.n_lam) + self.G @ self.G.T + self.H - self.H.T
-        self.A_fn = Function('A_fn', [self.dyn_theta], [self.A])
-        self.B_fn = Function('B_fn', [self.dyn_theta], [self.B])
-        self.C_fn = Function('C_fn', [self.dyn_theta], [self.C])
+        self.F_fn = Function('F_fn', [self.lcp_theta], [self.F])
         self.D_fn = Function('D_fn', [self.lcp_theta], [self.D])
         self.E_fn = Function('E_fn', [self.lcp_theta], [self.E])
         self.G_fn = Function('G_fn', [self.lcp_theta], [self.G])
         self.H_fn = Function('H_fn', [self.lcp_theta], [self.H])
-        self.F_fn = Function('F_fn', [self.lcp_theta], [self.F])
+        self.A_fn = Function('A_fn', [self.dyn_theta], [self.A])
+        self.B_fn = Function('B_fn', [self.dyn_theta], [self.B])
+        self.C_fn = Function('C_fn', [self.dyn_theta], [self.C])
         self.lcp_offset_fn = Function('lcp_offset_fn', [self.lcp_theta], [self.lcp_offset])
 
         self.val_lcp_theta = 0.1 * np.random.randn(self.n_lcp_theta)
@@ -479,14 +689,15 @@ class LCS_learner_regression:
 
         # lcp loss
         self.dist = self.D @ self.x + self.E @ self.u + self.F @ self.lam + self.lcp_offset
-        data_lcp_theta = vertcat(self.x, self.u, self.lcp_theta)
+        lcp_data_theta = vertcat(self.x, self.u, self.lcp_theta)
         self.lcp_loss = dot(self.dist, self.lam)
-        quadprog = {'x': self.lam, 'f': self.lcp_loss, 'g': self.dist, 'p': data_lcp_theta}
+        quadprog = {'x': self.lam, 'f': self.lcp_loss, 'g': self.dist, 'p': lcp_data_theta}
         opts = {'printLevel': 'none', }
         self.lcp_Solver = qpsol('lcp_Solver', 'qpoases', quadprog, opts)
 
         # define the dynamics loss
         self.x_next = SX.sym('x_next', self.n_state)
+        data = vertcat(self.x, self.u, self.x_next)
         self.dyn = self.A @ self.x + self.B @ self.u + self.C @ self.lam
         self.dyn_loss = dot(self.dyn - self.x_next, self.dyn - self.x_next)
         self.dyn_fn = Function('dyn_fn', [self.x, self.u, self.lam, self.dyn_theta], [self.dyn])
@@ -508,22 +719,36 @@ class LCS_learner_regression:
 
     def compute_lambda(self, x_batch, u_batch):
         self.differetiable()
+
         # prepare the data
         batch_size = x_batch.shape[0]
         lcp_data_batch = np.hstack((x_batch, u_batch))
         lcp_theta_batch = np.tile(self.val_lcp_theta, (batch_size, 1))
-        data_lcp_theta_batch = np.hstack((lcp_data_batch, lcp_theta_batch))
+        lcp_data_theta_batch = np.hstack((lcp_data_batch, lcp_theta_batch))
 
         # compute the lam solution
-        sol_batch = self.lcp_Solver(lbx=0.0, lbg=0.0, p=data_lcp_theta_batch.T)
+        sol_batch = self.lcp_Solver(lbx=0.0, lbg=0.0, p=lcp_data_theta_batch.T)
         lcp_loss_opt_batch = sol_batch['f'].full().flatten()
         lam_opt_batch = sol_batch['x'].full().T
 
         return lam_opt_batch, lcp_loss_opt_batch
 
     def dyn_regression(self, x_batch, u_batch, lam_opt_batch, x_next_batch):
+        # prepare the data
+        batch_size = x_batch.shape[0]
+
+        I = np.eye(self.n_state)
+        kron_x = np.kron(x_batch, I)
+        kron_u = np.kron(u_batch, I)
+        kron_lam_opt = np.kron(lam_opt_batch, I)
+        kron_x_next = x_next_batch.flatten()
+
+        mat_A = np.hstack((kron_x, kron_u, kron_lam_opt))
+        vec_b = kron_x_next
 
         # prepare the data
+        batch_size = x_batch.shape[0]
+
         I = np.eye(self.n_state)
         kron_x = np.kron(x_batch, I)
         kron_u = np.kron(u_batch, I)
@@ -535,7 +760,8 @@ class LCS_learner_regression:
 
         # least square
         dyn_theta_opt, dyn_loss_opt, _, _ = numpy.linalg.lstsq(mat_A, vec_b, rcond=None)
-        dyn_loss_opt = dyn_loss_opt.item()
+        dyn_loss_opt=dyn_loss_opt.item()
+
         self.val_dyn_theta = dyn_theta_opt
 
         return dyn_loss_opt
@@ -549,42 +775,12 @@ class LCS_learner_regression:
         # compute the gradient value
         dlcp = self.dloss_dlcp_fn(data_batch.T, lam_opt_batch.T, dyn_theta_opt_batch.T, lcp_theta_batch.T)
         dlcp_mean = dlcp.full().mean(axis=1)
+
         return dlcp_mean.flatten()
-
-    def computeLCSMats(self, compact=True):
-        A = self.A_fn(self.val_dyn_theta).full()
-        B = self.B_fn(self.val_dyn_theta).full()
-        C = self.C_fn(self.val_dyn_theta).full()
-
-        D = self.D_fn(self.val_lcp_theta).full()
-        E = self.E_fn(self.val_lcp_theta).full()
-        F = self.F_fn(self.val_lcp_theta).full()
-        G = self.G_fn(self.val_lcp_theta).full()
-        H = self.H_fn(self.val_lcp_theta).full()
-        lcp_offset = self.lcp_offset_fn(self.val_lcp_theta).full()
-
-        lcs_theta = vertcat(vec(A), vec(B), vec(C),
-                            vec(D), vec(E), vec(F),
-                            vec(lcp_offset))
-
-        if compact is True:
-            return lcs_theta
-        else:
-            return {'A': A,
-                    'B': B,
-                    'C': C,
-                    'D': D,
-                    'E': E,
-                    'F': F,
-                    'G': G,
-                    'H': H,
-                    'lcp_offset': lcp_offset,
-                    }
-
-    # the following are utility functions
 
     def dyn_prediction(self, x_batch, u_batch):
         self.differetiable()
+
         # prepare the data
         batch_size = x_batch.shape[0]
         lcp_data_batch = np.hstack((x_batch, u_batch))
@@ -629,6 +825,37 @@ class LCS_learner_regression:
 
         return state_traj_batch, lam_traj_batch
 
+    def computeLCSMats(self, compact=True):
+        A = self.A_fn(self.val_dyn_theta).full()
+        B = self.B_fn(self.val_dyn_theta).full()
+        C = self.C_fn(self.val_dyn_theta).full()
+
+        D = self.D_fn(self.val_lcp_theta).full()
+        E = self.E_fn(self.val_lcp_theta).full()
+        F = self.F_fn(self.val_lcp_theta).full()
+        G = self.G_fn(self.val_lcp_theta).full()
+        H = self.H_fn(self.val_lcp_theta).full()
+        lcp_offset = self.lcp_offset_fn(self.val_lcp_theta).full()
+
+        lcs_theta = vertcat(vec(A), vec(B), vec(C),
+                            vec(D), vec(E), vec(F),
+                            vec(lcp_offset))
+
+        # return lcs_theta, A, B, C, D, E, F, lcp_offset
+        if compact is True:
+            return lcs_theta
+        else:
+            return {'A': A,
+                    'B': B,
+                    'C': C,
+                    'D': D,
+                    'E': E,
+                    'F': F,
+                    'G': G,
+                    'H': H,
+                    'lcp_offset': lcp_offset,
+                    }
+
     def dyn_step(self, x_batch, u_batch):
         self.differetiable()
 
@@ -667,6 +894,201 @@ class LCS_learner_regression:
         next_x = self.dyn_fn(curr_x, curr_u, curr_lam, self.val_dyn_theta).full().flatten()
 
         return next_x, curr_lam
+
+
+# class for learning LCS from the hybrid data (backup)
+class LCS_learner_regression_backup:
+    def __init__(self, n_state, n_control, n_lam,
+                 A=None, B=None, C=None, D=None, E=None, G=None, H=None, lcp_offset=None,
+                 stiffness=0.):
+        self.n_lam = n_lam
+        self.n_state = n_state
+        self.n_control = n_control
+
+        self.lam = SX.sym('lam', self.n_lam)
+        self.x = SX.sym('x', self.n_state)
+        self.u = SX.sym('u', self.n_control)
+
+        self.theta = []
+        self.lcp_theta = []
+        self.dyn_theta = []
+        if A is None:
+            self.A = SX.sym('A', self.n_state, self.n_state)
+            self.theta += [vec(self.A)]
+            self.dyn_theta += [vec(self.A)]
+        else:
+            self.A = DM(A)
+
+        if B is None:
+            self.B = SX.sym('B', self.n_state, self.n_control)
+            self.theta += [vec(self.B)]
+            self.dyn_theta += [vec(self.B)]
+        else:
+            self.B = DM(B)
+
+        if C is None:
+            self.C = SX.sym('C', self.n_state, self.n_lam)
+            self.theta += [vec(self.C)]
+            self.dyn_theta += [vec(self.C)]
+        else:
+            self.C = DM(C)
+
+        if D is None:
+            self.D = SX.sym('D', self.n_lam, self.n_state)
+            self.theta += [vec(self.D)]
+            self.lcp_theta += [vec(self.D)]
+        else:
+            self.D = DM(D)
+
+        if E is None:
+            self.E = SX.sym('E', self.n_lam, self.n_control)
+            self.theta += [vec(self.E)]
+            self.lcp_theta += [vec(self.E)]
+        else:
+            self.E = DM(E)
+
+        if G is None:
+            self.G = SX.sym('G', self.n_lam, self.n_lam)
+            self.theta += [vec(self.G)]
+            self.lcp_theta += [vec(self.G)]
+
+        else:
+            self.G = DM(G)
+
+        if H is None:
+            self.H = SX.sym('H', self.n_lam, self.n_lam)
+            self.theta += [vec(self.H)]
+            self.lcp_theta += [vec(self.H)]
+
+        else:
+            self.H = DM(H)
+
+        if lcp_offset is None:
+            self.lcp_offset = SX.sym('lcp_offset', self.n_lam)
+            self.theta += [vec(self.lcp_offset)]
+            self.lcp_theta += [vec(self.lcp_offset)]
+
+        else:
+            self.lcp_offset = DM(lcp_offset)
+
+        self.theta = vcat(self.theta)
+        self.lcp_theta = vcat(self.lcp_theta)
+        self.dyn_theta = vcat(self.dyn_theta)
+
+        self.n_theta = self.theta.numel()
+        self.n_lcp_theta = self.lcp_theta.numel()
+        self.n_dyn_theta = self.dyn_theta.numel()
+
+        self.F = stiffness * np.eye(self.n_lam) + self.G @ self.G.T + self.H - self.H.T
+        self.F_fn = Function('F_fn', [self.lcp_theta], [self.F])
+        self.D_fn = Function('D_fn', [self.lcp_theta], [self.D])
+        self.E_fn = Function('E_fn', [self.lcp_theta], [self.E])
+        self.G_fn = Function('G_fn', [self.lcp_theta], [self.G])
+        self.H_fn = Function('H_fn', [self.lcp_theta], [self.H])
+        self.A_fn = Function('A_fn', [self.dyn_theta], [self.A])
+        self.B_fn = Function('B_fn', [self.dyn_theta], [self.B])
+        self.C_fn = Function('C_fn', [self.dyn_theta], [self.C])
+        self.lcp_offset_fn = Function('lcp_offset_fn', [self.lcp_theta], [self.lcp_offset])
+
+    def differetiable(self):
+
+        # lcp loss
+        self.dist = self.D @ self.x + self.E @ self.u + self.F @ self.lam + self.lcp_offset
+        lcp_data_theta = vertcat(self.x, self.u, self.lcp_theta)
+        self.lcp_loss = dot(self.dist, self.lam)
+        quadprog = {'x': self.lam, 'f': self.lcp_loss, 'g': self.dist, 'p': lcp_data_theta}
+        opts = {'printLevel': 'none', }
+        self.lcp_Solver = qpsol('lcp_Solver', 'qpoases', quadprog, opts)
+
+        # define the dynamics loss
+        self.x_next = SX.sym('x_next', self.n_state)
+        data = vertcat(self.x, self.u, self.x_next)
+        self.dyn = self.A @ self.x + self.B @ self.u + self.C @ self.lam
+        self.dyn_loss = dot(self.dyn - self.x_next, self.dyn - self.x_next)
+        self.dyn_fn = Function('dyn_fn', [self.x, self.u, self.lam, self.dyn_theta], [self.dyn])
+
+        # define the dynamics loss with respect to the lam variable
+        self.dloss_dlam = jacobian(self.dyn_loss, self.lam)
+
+        # define the gradient of lam with respect to lcp_theta
+        g = diag(self.lam) @ self.dist
+        dg_dlam = jacobian(g, self.lam)
+        dg_dlcp = jacobian(g, self.lcp_theta)
+        self.dlam_dlcp = -inv(dg_dlam) @ dg_dlcp
+        self.dloss_dlcp = (self.dloss_dlam @ self.dlam_dlcp).T
+
+        # assemble functions
+        data = vertcat(self.x, self.u, self.x_next)
+        self.dloss_dlcp_fn = Function('dloss_dlcp_fn', [data, self.lam, self.dyn_theta, self.lcp_theta],
+                                      [self.dloss_dlcp])
+
+    def compute_lambda(self, x_batch, u_batch, lcp_theta):
+        self.differetiable()
+
+        # prepare the data
+        batch_size = x_batch.shape[0]
+        lcp_data_batch = np.hstack((x_batch, u_batch))
+        lcp_theta_batch = np.tile(lcp_theta, (batch_size, 1))
+        lcp_data_theta_batch = np.hstack((lcp_data_batch, lcp_theta_batch))
+
+        # compute the lam solution
+        sol_batch = self.lcp_Solver(lbx=0.0, lbg=0.0, p=lcp_data_theta_batch.T)
+        lcp_loss_opt_batch = sol_batch['f'].full().flatten()
+        lam_opt_batch = sol_batch['x'].full().T
+
+        return lam_opt_batch, lcp_loss_opt_batch
+
+    def dyn_regression(self, x_batch, u_batch, lam_opt_batch, x_next_batch):
+        # prepare the data
+        batch_size = x_batch.shape[0]
+
+        I = np.eye(self.n_state)
+        kron_x = np.kron(x_batch, I)
+        kron_u = np.kron(u_batch, I)
+        kron_lam_opt = np.kron(lam_opt_batch, I)
+        kron_x_next = x_next_batch.flatten()
+
+        mat_A = np.hstack((kron_x, kron_u, kron_lam_opt))
+        vec_b = kron_x_next
+
+        # do the regression for dyn_theta
+        dyn_theta_opt = inv(mat_A.T @ mat_A) @ (mat_A.T @ vec_b)
+        dyn_loss_opt = dot(mat_A @ dyn_theta_opt - vec_b, mat_A @ dyn_theta_opt - vec_b) / batch_size
+
+        return dyn_theta_opt.full().flatten(), dyn_loss_opt
+
+    def gradient_step(self, x_batch, u_batch, x_next_batch, lam_opt_batch, dyn_theta_opt, lcp_theta):
+        batch_size = x_batch.shape[0]
+        data_batch = np.hstack((x_batch, u_batch, x_next_batch))
+        dyn_theta_opt_batch = np.tile(dyn_theta_opt, (batch_size, 1))
+        lcp_theta_batch = np.tile(lcp_theta, (batch_size, 1))
+
+        # compute the gradient value
+        dlcp = self.dloss_dlcp_fn(data_batch.T, lam_opt_batch.T, dyn_theta_opt_batch.T, lcp_theta_batch.T)
+        dlcp_mean = dlcp.full().mean(axis=1)
+
+        return dlcp_mean.flatten()
+
+    def dyn_prediction(self, x_batch, u_batch, dyn_theta_opt, lcp_theta):
+        self.differetiable()
+
+        # prepare the data
+        batch_size = x_batch.shape[0]
+        lcp_data_batch = np.hstack((x_batch, u_batch))
+        lcp_theta_batch = np.tile(lcp_theta, (batch_size, 1))
+        lcp_data_theta_batch = np.hstack((lcp_data_batch, lcp_theta_batch))
+
+        # compute the lam solution
+        sol_batch = self.lcp_Solver(lbx=0.0, lbg=0.0, p=lcp_data_theta_batch.T)
+        lam_opt_batch = sol_batch['x'].full().T
+
+        # compute the next state batch
+        dyn_theta_op_batch = np.tile(dyn_theta_opt, (batch_size, 1))
+        x_next_batch = self.dyn_fn(x_batch.T, u_batch.T, lam_opt_batch.T, dyn_theta_op_batch.T).full().T
+
+        return x_next_batch, lam_opt_batch
+
+    # do statistics for the modes
 
 
 def statiModes(lam_batch, tol=1e-5):
@@ -823,8 +1245,10 @@ def LCSLearningRegression(lcs_learner, optimizier, control_traj_batch, true_stat
 
         # compute the lambda batch
         lam_opt_mini_batch, loss_opt_mini_batch = lcs_learner.compute_lambda(x_minibatch, u_minibatch)
+
         # regression for the dynamics
         dyn_loss_opt = lcs_learner.dyn_regression(x_minibatch, u_minibatch, lam_opt_mini_batch, x_next_minibatch)
+
         # compute the gradient
         dlcp_theta = lcs_learner.gradient_step(x_minibatch, u_minibatch, x_next_minibatch, lam_opt_mini_batch)
 
@@ -1510,9 +1934,8 @@ class LCS_evaluation2:
 # evaluation object to evaluate the learned lcs model using a control cost function
 # random_initial condition
 class MPC_Controller:
-
     def __init__(self, lcs_learner):
-        self.name = 'lcs optimal control'
+        self.name = 'lcs evaluation'
 
         # define the system variables
         self.n_state = lcs_learner.n_state
@@ -1541,7 +1964,7 @@ class MPC_Controller:
         # define the dynamics
         self.f = self.A @ self.x + self.B @ self.u + self.C @ self.lam
 
-    def set_cost_function(self, Q, R, QN):
+    def setCostFunction(self, Q, R, QN):
         self.Q = DM(Q)
         self.R = DM(R)
         self.QN = DM(QN)
@@ -1552,7 +1975,7 @@ class MPC_Controller:
         self.path_cost_fn = Function('path_cost_fn', [self.x, self.u], [self.path_cost])
         self.final_cost_fn = Function('final_cost_fn', [self.x], [self.final_cost])
 
-    def compute_cost(self, control_traj_batch, state_traj_batch):
+    def computeCost(self, control_traj_batch, state_traj_batch):
         cost_batch = []
         batch_size = len(control_traj_batch)
         for i in range(batch_size):
@@ -1572,7 +1995,34 @@ class MPC_Controller:
 
         return cost_batch
 
-    def initialize_mpc(self, mpc_horizon):
+    def differentiable(self):
+        # define the gradient of lam with respect to lcp_theta
+        self.dist = self.D @ self.x + self.E @ self.u + self.F @ self.lam + self.lcp_offset
+        g = diag(self.lam) @ self.dist
+        dg_dlam = jacobian(g, self.lam)
+        dg_dx = jacobian(g, self.x)
+        dg_du = jacobian(g, self.u)
+        dlam_dx = -inv(dg_dlam) @ dg_dx
+        dlam_du = -inv(dg_dlam) @ dg_du
+
+        # differentiate
+        df_dx = jacobian(self.f, self.x) + jacobian(self.f, self.lam) @ dlam_dx
+        df_du = jacobian(self.f, self.u) + jacobian(self.f, self.lam) @ dlam_du
+
+        self.dfdx_fn = Function('dfdx_fn', [self.x, self.u, self.lam, self.lcs_theta], [df_dx])
+        self.dfdu_fn = Function('dfdx_fn', [self.x, self.u, self.lam, self.lcs_theta], [df_du])
+
+        # compute the gradient of the cost function
+        self.dcdx = jacobian(self.path_cost, self.x).T
+        self.dcdu = jacobian(self.path_cost, self.u).T
+        self.dhdx = jacobian(self.final_cost, self.x).T
+
+        # establish the functions for the above gradient
+        self.dcdx_fn = Function('dcdx_fn', [self.x, self.u], [self.dcdx])
+        self.dcdu_fn = Function('dcdu_fn', [self.x, self.u], [self.dcdu])
+        self.dhdx_fn = Function('dhdx_fn', [self.x], [self.dhdx])
+
+    def initializeMPC(self, mpc_horizon):
 
         self.mpc_horizon = mpc_horizon
 
@@ -1585,6 +2035,10 @@ class MPC_Controller:
         g = []
         lbg = []
         ubg = []
+
+        lcs_theta = vertcat(vec(self.A), vec(self.B), vec(self.C),
+                            vec(self.D), vec(self.E), vec(self.F),
+                            vec(self.lcp_offset))
 
         # "Lift" initial conditions
         Xk = casadi.SX.sym('X0', self.n_state)
@@ -1641,7 +2095,7 @@ class MPC_Controller:
 
         # Create an NLP solver and solve
         opts = {'ipopt.print_level': 0, 'ipopt.sb': 'yes', 'print_time': 0}
-        prob = {'f': J, 'x': casadi.vertcat(*w), 'g': casadi.vertcat(*g), 'p': self.lcs_theta}
+        prob = {'f': J, 'x': casadi.vertcat(*w), 'g': casadi.vertcat(*g), 'p': lcs_theta}
         self.oc_solver = casadi.nlpsol('solver', 'ipopt', prob, opts)
 
         self.lbw = DM(lbw)
@@ -1650,39 +2104,53 @@ class MPC_Controller:
         self.ubg = DM(ubg)
         self.w0 = DM(w0)
 
-    def oc(self, lcs_theta, init_state):
-        # set the optimal control bounds
-        lbw = self.lbw
-        ubw = self.ubw
-        init_w = self.w0
-        lbw[0:self.n_state] = DM(init_state)
-        ubw[0:self.n_state] = DM(init_state)
-        init_w[0:self.n_state] = DM(init_state)
-
-        # set the optimal control parameter
-        oc_parameters = DM(lcs_theta)
-        sol = self.oc_solver(x0=self.w0, lbx=self.lbw, ubx=self.ubw, lbg=self.lbg, ubg=self.ubg, p=oc_parameters)
-        w_opt = sol['x']
-
-        # extract the optimal control and state
-        sol_traj = w_opt[0:self.mpc_horizon * (self.n_state + self.n_control + self.n_lam)].reshape(
-            (self.n_state + self.n_control + self.n_lam, -1))
-        x_traj = casadi.horzcat(sol_traj[0:self.n_state, :],
-                                w_opt[self.mpc_horizon * (self.n_state + self.n_control + self.n_lam):]).T.full()
-        u_traj = sol_traj[self.n_state:self.n_state + self.n_control, :].T.full()
-        lam_traj = sol_traj[self.n_state + self.n_control:, :].T.full()
-
-        sol = {'state_traj_opt': x_traj,
-               'control_traj_opt': u_traj,
-               'lam_traj_opt': lam_traj
-               }
-
-        return sol
-
-    def mpc_step(self, lcs_learner, curr_state):
+    def mpc(self, lcs_learner, state_batch, lcs_theta=None):
 
         # take out the current lcs system parameter
-        lcs_theta = lcs_learner.computeLCSMats()
+        if lcs_theta is None:
+            lcs_theta = lcs_learner.computeLCSMats()
+        else:
+            lcs_theta = lcs_theta
+
+        # do the one step mpc
+        state_batch = list(state_batch)
+        batch_size = len(state_batch)
+        control_batch = []
+        for i in range(batch_size):
+            state = state_batch[i]
+            # set the optimal control bounds
+            lbw = self.lbw
+            ubw = self.ubw
+            init_w = self.w0
+            lbw[0:self.n_state] = DM(state)
+            ubw[0:self.n_state] = DM(state)
+            init_w[0:self.n_state] = DM(state)
+
+            # set the optimal control parameter
+            oc_parameters = DM(lcs_theta)
+            sol = self.oc_solver(x0=self.w0, lbx=self.lbw, ubx=self.ubw, lbg=self.lbg, ubg=self.ubg, p=oc_parameters)
+            w_opt = sol['x']
+            self.w0 = w_opt
+
+            # extract the optimal control and state
+            sol_traj = w_opt[0:self.mpc_horizon * (self.n_state + self.n_control + self.n_lam)].reshape(
+                (self.n_state + self.n_control + self.n_lam, -1))
+            x_traj = casadi.horzcat(sol_traj[0:self.n_state, :],
+                                    w_opt[self.mpc_horizon * (self.n_state + self.n_control + self.n_lam):]).T.full()
+            u_traj = sol_traj[self.n_state:self.n_state + self.n_control, :].T.full()
+            lam_traj = sol_traj[self.n_state + self.n_control:, :].T.full()
+
+            control_batch += [w_opt[self.n_state:self.n_state + self.n_control].full().flatten()]
+
+        return control_batch
+
+    def mpc_step(self, lcs_learner, curr_state, lcs_theta=None):
+
+        # take out the current lcs system parameter
+        if lcs_theta is None:
+            lcs_theta = lcs_learner.computeLCSMats()
+        else:
+            lcs_theta = lcs_theta
 
         # set the optimal control bounds
         lbw = self.lbw
