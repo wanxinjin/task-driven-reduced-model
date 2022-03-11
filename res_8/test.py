@@ -1,5 +1,5 @@
 import matplotlib.pyplot as plt
-
+import lcs.utility as utility
 import lcs.optim as opt
 import lcs.task_driven as TD
 import numpy as np
@@ -27,9 +27,6 @@ F = lcs_mats['F']
 lcp_offset = lcs_mats['lcp_offset']
 
 true_sys = TD.LCS_learner_regression(n_state, n_control, n_lam, A, B, C, D, E, G, H, lcp_offset, stiffness=0)
-true_lcp_theta = vertcat(vec(D), vec(E), vec(G), vec(H), vec(lcp_offset)).full().flatten()
-true_dyn_theta = vertcat(vec(A), vec(B), vec(C)).full().flatten()
-true_theta = vertcat(true_dyn_theta, true_lcp_theta).full().flatten()
 
 # ==============================    load the learned results
 load = np.load('results.npy', allow_pickle=True).item()
@@ -58,32 +55,23 @@ plt.show()
 # ============================= establish the lcs learner (automatically initialized)
 reduced_n_lam = load['reduced_n_lam']
 print('n_lam for the learner:', reduced_n_lam)
-
 lcs_learner = TD.LCS_learner_regression(n_state, n_control, n_lam=reduced_n_lam, stiffness=1)
+lcs_learner.val_lcs_theta = learned_lcs_theta
 
 # ============================= initialize an evaluator for the learned system
 mpc_horizon = load['mpc_horizon']
-controller_evaluator = TD.MPC_Controller(lcs_learner)
-controller_evaluator.setCostFunction(Q, R, QN)
-controller_evaluator.initializeMPC(mpc_horizon)
+learner_mpc = TD.MPC_Controller(lcs_learner)
+learner_mpc.set_cost_function(Q, R, QN)
+learner_mpc.initialize_mpc(mpc_horizon)
 
 # # ============================= compute the true optimal cost (for reference, this is not always correct)
 traj_count = 30
 init_state_batch = np.random.randn(traj_count, n_state)
-state_batch_traj = [list(init_state_batch)]
-control_batch_traj = []
-for t in range(control_horizon):
-    # compute the control input using the current lcs learner
-    control_batch_traj += [controller_evaluator.mpc(None, state_batch_traj[-1], learned_lcs_theta)]
-    # simulate to the next step
-    next_state_batch, lam_batch = true_sys.dyn_step(state_batch_traj[-1], control_batch_traj[-1])
-    state_batch_traj += [next_state_batch]
-# reorganize the data format
-control_traj_batch = TD.dataReorgnize(control_batch_traj)
-state_traj_batch = TD.dataReorgnize(state_batch_traj)
-true_sys_opt_cost_batch = controller_evaluator.computeCost(control_traj_batch, state_traj_batch)
-print('control cost on real system', np.mean(true_sys_opt_cost_batch))
-
+state_traj_batch, control_traj_batch, cost_batch = utility.simulate_mpc_on_lcs(learner_mpc,
+                                                                               lcs_learner,
+                                                                               true_sys,
+                                                                               init_state_batch,
+                                                                               control_horizon)
 
 # plot
 for sys_trajectory in state_traj_batch:
@@ -91,4 +79,3 @@ for sys_trajectory in state_traj_batch:
 plt.ylabel('state of true system')
 plt.xlabel('time')
 plt.show()
-

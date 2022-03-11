@@ -215,169 +215,63 @@ class LCS_learner:
         return x_next_batch, lam_opt_batch
 
 
-# class for using a lcs to do mpc control
-class LCS_MPC:
-    def __init__(self, A, B, C, D, E, F, lcp_offset):
-        self.A = DM(A)
-        self.B = DM(B)
-        self.C = DM(C)
-        self.D = DM(D)
-        self.E = DM(E)
-        self.F = DM(F)
-        self.lcp_offset = DM(lcp_offset)
+# learn a lcs model from the sampled data using l4dc paper
+def LCSLearning(lcs_learner, optimizer, control_traj_batch, true_state_traj_batch,
+                max_iter=5000, minibatch_size=100):
+    # converting the data form
+    batch_size = len(control_traj_batch)
+    train_u_batch = []
+    train_x_batch = []
+    train_x_next_batch = []
+    for i in range(batch_size):
+        train_u_batch += [control_traj_batch[i]]
+        train_x_batch += [true_state_traj_batch[i][0:-1]]
+        train_x_next_batch += [true_state_traj_batch[i][1:]]
+    train_u_batch = np.vstack(train_u_batch)
+    train_x_next_batch = np.vstack(train_x_next_batch)
+    train_x_batch = np.vstack(train_x_batch)
 
-        self.n_state = self.A.shape[0]
-        self.n_control = self.B.shape[1]
-        self.n_lam = self.C.shape[1]
+    # do the learning iteration
+    train_data_size = train_u_batch.shape[0]
+    epsilon = np.logspace(3, -2, max_iter)
+    for k in range(max_iter):
+        # mini batch dataset
+        shuffle_index = np.random.permutation(train_data_size)[0:minibatch_size]
+        x_minibatch = train_x_batch[shuffle_index]
+        u_minibatch = train_u_batch[shuffle_index]
+        x_next_minibatch = train_x_next_batch[shuffle_index]
 
-        # define the system variable
-        x = casadi.MX.sym('x', self.n_state)
-        u = casadi.MX.sym('u', self.n_control)
-        xu_pair = vertcat(x, u)
-        lam = casadi.MX.sym('lam', self.n_lam)
+        # compute the lambda batch
+        lcs_learner.differetiable(gamma=1e-3, epsilon=epsilon[k])
+        lam_phi_opt_mini_batch, loss_opt_batch = lcs_learner.compute_lambda(x_minibatch, u_minibatch, x_next_minibatch)
 
-        # dynamics
-        dyn = self.A @ x + self.B @ u + self.C @ lam
-        self.dyn_fn = Function('dyn_fn', [xu_pair, lam], [dyn])
+        # compute the gradient
+        dtheta, loss, dyn_loss, lcp_loss, dtheta_hessian = \
+            lcs_learner.gradient_step(x_minibatch, u_minibatch, x_next_minibatch, lam_phi_opt_mini_batch,
+                                      second_order=False)
 
-        # loss function
-        lcp_loss = dot(self.D @ x + self.E @ u + self.F @ lam + self.lcp_offset, lam)
+        # store and update
+        lcs_learner.val_theta = optimizer.step(lcs_learner.val_theta, dtheta)
 
-        # constraints
-        dis_cstr = self.D @ x + self.E @ u + self.F @ lam + self.lcp_offset
-        lam_cstr = lam
-        total_cstr = vertcat(dis_cstr, lam_cstr)
-        self.dis_cstr_fn = Function('dis_cstr_fn', [lam, xu_pair], [dis_cstr])
+        if k % 100 == 0:
+            # on the prediction using the current learned lcs
+            pred_x_next_batch, pred_lam_batch = lcs_learner.dyn_prediction(train_x_batch, train_u_batch)
 
-        # establish the qp solver to solve for LCP
-        quadprog = {'x': lam, 'f': lcp_loss, 'g': total_cstr, 'p': xu_pair}
-        opts = {'printLevel': 'none', }
-        self.lcpSolver = qpsol('S', 'qpoases', quadprog, opts)
+            # compute the prediction error
+            error_x_next_batch = pred_x_next_batch - train_x_next_batch
+            relative_error = (
+                    la.norm(error_x_next_batch, axis=1) / (la.norm(train_x_next_batch, axis=1) + 0.0001)).mean()
 
-    def forward(self, x_t, u_t):
-        xu_pair = vertcat(DM(x_t), DM(u_t))
-        sol = self.lcpSolver(p=xu_pair, lbg=0.)
-        lam_t = sol['x'].full().flatten()
-        x_next = self.dyn_fn(xu_pair, lam_t).full().flatten()
-        return x_next, lam_t
+            print(
+                k,
+                '| loss:', loss,
+                '| dyn_loss:', dyn_loss,
+                '| lcp_loss:', lcp_loss,
+                '| grad:', norm_2(dtheta),
+                '| PRE:', relative_error,
+                '| epsilon:', epsilon[k],
+            )
 
-    def oc_setup(self, mpc_horizon):
-
-        self.mpc_horizon = mpc_horizon
-
-        # set the cost function parameters
-        Q = MX.sym('Q', self.n_state, self.n_state)
-        R = MX.sym('R', self.n_control, self.n_control)
-        QN = MX.sym('QN', self.n_state, self.n_state)
-
-        # define the parameters
-        oc_parameters = vertcat(vec(Q), vec(R), vec(QN))
-
-        # Start with an empty NLP
-        w = []
-        w0 = []
-        lbw = []
-        ubw = []
-        J = 0
-        g = []
-        lbg = []
-        ubg = []
-
-        # "Lift" initial conditions
-        Xk = casadi.MX.sym('X0', self.n_state)
-        w += [Xk]
-        lbw += np.zeros(self.n_state).tolist()
-        ubw += np.zeros(self.n_state).tolist()
-        w0 += np.zeros(self.n_state).tolist()
-
-        # formulate the NLP
-        for k in range(self.mpc_horizon):
-            # New NLP variable for the control
-            Uk = casadi.MX.sym('U_' + str(k), self.n_control)
-            w += [Uk]
-            lbw += self.n_control * [-inf]
-            ubw += self.n_control * [inf]
-            w0 += self.n_control * [0.]
-
-            # new NLP variable for the complementarity variable
-            Lamk = casadi.MX.sym('lam' + str(k), self.n_lam)
-            w += [Lamk]
-            lbw += self.n_lam * [0.]
-            ubw += self.n_lam * [inf]
-            w0 += self.n_lam * [0.]
-
-            # Add complementarity equation
-            g += [self.D @ Xk + self.E @ Uk + self.F @ Lamk + self.lcp_offset]
-            lbg += self.n_lam * [0.]
-            ubg += self.n_lam * [inf]
-
-            g += [casadi.dot(self.D @ Xk + self.E @ Uk + self.F @ Lamk + self.lcp_offset, Lamk)]
-            lbg += [0.]
-            ubg += [0.]
-
-            # Integrate till the end of the interval
-            Xnext = self.A @ Xk + self.B @ Uk + self.C @ Lamk
-            Ck = dot(Xk, Q @ Xk) + dot(Uk, R @ Uk)
-            J = J + Ck
-
-            # New NLP variable for state at end of interval
-            Xk = casadi.MX.sym('X_' + str(k + 1), self.n_state)
-            w += [Xk]
-            lbw += self.n_state * [-inf]
-            ubw += self.n_state * [inf]
-            w0 += self.n_state * [0.]
-
-            # Add constraint for the dynamics
-            g += [Xnext - Xk]
-            lbg += self.n_state * [0.]
-            ubg += self.n_state * [0.]
-
-        # Add the final cost
-        J = J + dot(Xk, QN @ Xk)
-
-        # Create an NLP solver and solve
-        opts = {'ipopt.print_level': 0, 'ipopt.sb': 'yes', 'print_time': 0}
-        prob = {'f': J, 'x': casadi.vertcat(*w), 'g': casadi.vertcat(*g), 'p': oc_parameters}
-        self.solver = casadi.nlpsol('solver', 'ipopt', prob, opts)
-        self.lbw = DM(lbw)
-        self.ubw = DM(ubw)
-        self.lbg = DM(lbg)
-        self.ubg = DM(ubg)
-        self.w0 = DM(w0)
-
-    def mpc(self, init_state, mat_Q, mat_R, mat_QN, init_guess=None):
-
-        if init_guess is not None:
-            self.w0 = init_guess['w_opt']
-
-        # construct the parameter vector
-        oc_parameters = vertcat(vec(mat_Q), vec(mat_R), vec(mat_QN))
-
-        self.lbw[0:self.n_state] = DM(init_state)
-        self.ubw[0:self.n_state] = DM(init_state)
-        self.w0[0:self.n_state] = DM(init_state)
-
-        # Solve the NLP
-        sol = self.solver(x0=self.w0, lbx=self.lbw, ubx=self.ubw, lbg=self.lbg, ubg=self.ubg, p=oc_parameters)
-        w_opt = sol['x']
-        cost_opt = sol['f']
-
-        # extract the optimal control and state
-        sol_traj = w_opt[0:self.mpc_horizon * (self.n_state + self.n_control + self.n_lam)].reshape(
-            (self.n_state + self.n_control + self.n_lam, -1))
-        x_traj = casadi.horzcat(sol_traj[0:self.n_state, :],
-                                w_opt[self.mpc_horizon * (self.n_state + self.n_control + self.n_lam):]).T
-        u_traj = sol_traj[self.n_state:self.n_state + self.n_control, :].T
-        lam_traj = sol_traj[self.n_state + self.n_control:, :].T
-
-        opt_sol = {'state_traj_opt': x_traj.full(),
-                   'control_traj_opt': u_traj.full(),
-                   'lam_traj_opt': lam_traj.full(),
-                   'w_opt': w_opt,
-                   'cost_opt': cost_opt,
-                   }
-
-        return opt_sol
 
 
 # class for learning LCS from the hybrid data
@@ -474,6 +368,7 @@ class LCS_learner_regression:
 
         self.val_lcp_theta = 0.1 * np.random.randn(self.n_lcp_theta)
         self.val_dyn_theta = 0.1 * np.random.randn(self.n_dyn_theta)
+        self.val_lcs_theta=None
 
     def differetiable(self):
 
@@ -668,40 +563,6 @@ class LCS_learner_regression:
 
         return next_x, curr_lam
 
-
-def statiModes(lam_batch, tol=1e-5):
-    # dimension of the lambda
-    n_lam = lam_batch.shape[1]
-    # total number of modes
-    total_n_mode = float(2 ** n_lam)
-
-    # do the statistics for the modes
-    lam_batch_mode = np.where(lam_batch < tol, 0, 1)
-    unique_mode_list, mode_count_list = np.unique(lam_batch_mode, axis=0, return_counts=True)
-    mode_frequency_list = mode_count_list / lam_batch.shape[0]
-
-    return unique_mode_list, mode_frequency_list
-
-
-# do the plot of differnet mode
-def plotModes(lam_batch, tol=1e-5):
-    # do the statistics for the modes
-    lam_batch_mode = np.where(lam_batch < tol, 0, 1)
-    unique_mode_list, mode_indices = np.unique(lam_batch_mode, axis=0, return_inverse=True)
-
-    return unique_mode_list, mode_indices
-
-
-# generate the random control sequence
-def randomControlTraj(traj_count, horizon, n_control):
-    res = []
-    for i in range(traj_count):
-        single_traj = np.random.randn(horizon, n_control)
-        res += [single_traj]
-
-    return res
-
-
 # learn a lcs model from the sampled data using regression algorithms
 def LCSRegressionBuffer(lcs_learner, optimizier,
                         curr_control_traj_batch, curr_true_state_traj_batch,
@@ -848,66 +709,6 @@ def LCSLearningRegression(lcs_learner, optimizier, control_traj_batch, true_stat
                     '| PRE:', relative_error,
                 )
 
-
-# learn a lcs model from the sampled data using l4dc paper
-def LCSLearning(lcs_learner, optimizer, control_traj_batch, true_state_traj_batch,
-                max_iter=5000, minibatch_size=100):
-    # converting the data form
-    batch_size = len(control_traj_batch)
-    train_u_batch = []
-    train_x_batch = []
-    train_x_next_batch = []
-    for i in range(batch_size):
-        train_u_batch += [control_traj_batch[i]]
-        train_x_batch += [true_state_traj_batch[i][0:-1]]
-        train_x_next_batch += [true_state_traj_batch[i][1:]]
-    train_u_batch = np.vstack(train_u_batch)
-    train_x_next_batch = np.vstack(train_x_next_batch)
-    train_x_batch = np.vstack(train_x_batch)
-
-    # do the learning iteration
-    train_data_size = train_u_batch.shape[0]
-    epsilon = np.logspace(3, -2, max_iter)
-    for k in range(max_iter):
-        # mini batch dataset
-        shuffle_index = np.random.permutation(train_data_size)[0:minibatch_size]
-        x_minibatch = train_x_batch[shuffle_index]
-        u_minibatch = train_u_batch[shuffle_index]
-        x_next_minibatch = train_x_next_batch[shuffle_index]
-
-        # compute the lambda batch
-        lcs_learner.differetiable(gamma=1e-3, epsilon=epsilon[k])
-        lam_phi_opt_mini_batch, loss_opt_batch = lcs_learner.compute_lambda(x_minibatch, u_minibatch, x_next_minibatch)
-
-        # compute the gradient
-        dtheta, loss, dyn_loss, lcp_loss, dtheta_hessian = \
-            lcs_learner.gradient_step(x_minibatch, u_minibatch, x_next_minibatch, lam_phi_opt_mini_batch,
-                                      second_order=False)
-
-        # store and update
-        lcs_learner.val_theta = optimizer.step(lcs_learner.val_theta, dtheta)
-
-        if k % 100 == 0:
-            # on the prediction using the current learned lcs
-            pred_x_next_batch, pred_lam_batch = lcs_learner.dyn_prediction(train_x_batch, train_u_batch)
-
-            # compute the prediction error
-            error_x_next_batch = pred_x_next_batch - train_x_next_batch
-            relative_error = (
-                    la.norm(error_x_next_batch, axis=1) / (la.norm(train_x_next_batch, axis=1) + 0.0001)).mean()
-
-            print(
-                k,
-                '| loss:', loss,
-                '| dyn_loss:', dyn_loss,
-                '| lcp_loss:', lcp_loss,
-                '| grad:', norm_2(dtheta),
-                '| PRE:', relative_error,
-                '| epsilon:', epsilon[k],
-            )
-
-
-# compute the gradient of the control input using the recovery matrix (Jin. et al. IJRR)
 
 
 # evaluation object to evaluate the learned lcs model using a control cost function
@@ -1702,30 +1503,3 @@ class MPC_Controller:
 
         return curr_control
 
-
-def find_closest(candidate_rows, query):
-    n = len(candidate_rows)
-    min_distance = inf
-    closest_index = 0
-    for i in range(n):
-        candidate = candidate_rows[i]
-        current_distance = norm_2(candidate - query)
-        if current_distance < min_distance:
-            min_distance = current_distance
-            closest_index = i
-
-    return closest_index
-
-
-def dataReorgnize(batch_traj):
-    batch_size = len(batch_traj[0])
-    traj_horizon = len(batch_traj)
-
-    traj_batch = []
-    for batch_i in range(batch_size):
-        traj = []
-        for t in range(traj_horizon):
-            traj += [batch_traj[t][batch_i]]
-        traj = np.array(traj)
-        traj_batch += [traj]
-    return traj_batch

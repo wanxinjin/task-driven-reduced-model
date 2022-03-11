@@ -3,6 +3,7 @@ import lcs.optim as opt
 import lcs.task_driven as TD
 from casadi import *
 import time
+import lcs.utility as utility
 
 
 def print(*args):
@@ -33,7 +34,7 @@ R = np.eye(n_control)
 
 # define the true lcs system
 true_lcs = TD.LCS_learner_regression(n_state, n_control, n_lam, A, B, C, D, E, G, H, lcp_offset, stiffness=0)
-print('n_lam for the true system:', true_lcs)
+print('n_lam for the true system:', true_lcs.n_lam)
 
 # # ============================= define the ture mpc controller for the true system
 true_mpc = TD.MPC_Controller(true_lcs)
@@ -44,74 +45,47 @@ true_mpc.initialize_mpc(mpc_horizon)
 # =========================== use the true mpc to simulate on the true lcs system
 traj_count = 10
 init_state_batch = np.random.randn(traj_count, n_state)
-state_traj_batch = []
-control_traj_batch = []
-for i in range(traj_count):
-    true_state_traj = [init_state_batch[i]]
-    true_control_traj = []
-    for t in range(control_horizon):
-        # compute the current control input
-        true_control_traj += [true_mpc.mpc_step(true_lcs, true_state_traj[-1])]
-        # compute the true state
-        true_next_state, true_curr_lam = true_lcs.dynamics_step(true_state_traj[-1], true_control_traj[-1])
-        true_state_traj += [true_next_state]
-    # combine them together
-    state_traj_batch += [np.array(true_state_traj)]
-    control_traj_batch += [np.array(true_control_traj)]
-# compute the current control cost
-true_opt_cost_batch = true_mpc.computeCost(control_traj_batch, state_traj_batch)
-print('True_sys optimal cost (for reference):', np.mean(true_opt_cost_batch))
+true_state_traj_batch, true_control_traj_batch, true_cost_batch = utility.simulate_mpc_on_lcs(true_mpc,
+                                                                                              true_lcs,
+                                                                                              true_lcs,
+                                                                                              init_state_batch,
+                                                                                              control_horizon)
+print('True_sys optimal cost (for reference):', np.mean(true_cost_batch))
 
 # ============================= establish the lcs learner (automatically initialized)
 reduced_n_lam = 2
 lcs_learner = TD.LCS_learner_regression(n_state, n_control, n_lam=reduced_n_lam, stiffness=1)
 lcs_learner.val_lcp_theta = 0.1 * np.random.randn(lcs_learner.n_lcp_theta)
 
+# ============================= initialize an evaluator for the learned system
+learner_mpc = TD.MPC_Controller(lcs_learner)
+learner_mpc.set_cost_function(Q, R, QN)
+learner_mpc.initialize_mpc(mpc_horizon)
+
 # ============================= initialize the optimizer
 optimizier = opt.Adam()
 optimizier.learning_rate = 5e-3
 
-# ============================= initialize an evaluator for the learned system
-learner_mpc = TD.MPC_Controller(lcs_learner)
-learner_mpc.setCostFunction(Q, R, QN)
-learner_mpc.initializeMPC(mpc_horizon)
-
 # ================= starting the data-driven model learning process
 control_cost_trace = []
+lcs_theta_trace=[]
 prev_control_traj_batch = []
 prev_state_traj_batch = []
 for control_iter in range(20):
-
-    # # ============================= random the initial condition
-    traj_count = 50
+    # =========== use the mpc controller (based on the lcs model) to simulate the true system
+    traj_count = 10
     # np.random.seed(10)
     init_state_batch = np.random.randn(traj_count, n_state)
-
-    # # ============ use the mpc controller (based on the lcs model) to simulate the true system
-    state_traj_batch = []
-    control_traj_batch = []
-    for i in range(traj_count):
-        state_traj = [init_state_batch[i]]
-        control_traj = []
-        for t in range(control_horizon):
-            # compute the current control input
-            control_traj += [learner_mpc.mpc_step(lcs_learner, state_traj[-1])]
-            # compute the true state
-            next_state, curr_lam = true_lcs.dynamics_step(state_traj[-1], control_traj[-1])
-            state_traj += [next_state]
-        # combine them together
-        state_traj_batch += [np.array(state_traj)]
-        control_traj_batch += [np.array(control_traj)]
-
-    # compute the current control cost
-    cost_batch = learner_mpc.computeCost(control_traj_batch, state_traj_batch)
-
-    # ============================= print
+    state_traj_batch, control_traj_batch, cost_batch = utility.simulate_mpc_on_lcs(learner_mpc,
+                                                                                   lcs_learner,
+                                                                                   true_lcs,
+                                                                                   init_state_batch,
+                                                                                   control_horizon)
     print(
         '\n======================================================================'
         '\n|****** Control Iter:', control_iter,
         '| current control cost:', np.mean(cost_batch),
-        '| true control cost:', np.mean(true_opt_cost_batch),
+        '| true control cost:', np.mean(true_cost_batch),
         '\n'
     )
     control_cost_trace += [np.mean(cost_batch)]
