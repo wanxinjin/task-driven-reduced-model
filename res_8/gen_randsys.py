@@ -5,7 +5,7 @@ n_state = 3
 n_lam = 3
 n_control = 2
 # np.random.seed(1)
-A = 0.1*np.random.randn(n_state, n_state)
+A = 0.5*np.random.randn(n_state, n_state)
 C = np.random.randn(n_state, n_lam)
 B = np.random.randn(n_state, n_control)
 

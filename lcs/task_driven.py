@@ -430,7 +430,7 @@ class LCS_learner_regression:
 
         # least square
         dyn_theta_opt, dyn_loss_opt, _, _ = numpy.linalg.lstsq(mat_A, vec_b, rcond=None)
-        dyn_loss_opt = dyn_loss_opt.item()
+        dyn_loss_opt = dyn_loss_opt.tolist()
         self.val_dyn_theta = dyn_theta_opt
 
         return dyn_loss_opt
@@ -1480,10 +1480,11 @@ class MPC_Controller:
 
         return sol
 
-    def mpc_step(self, lcs_learner, curr_state):
+    def mpc_step(self, lcs_learner, curr_state, lcs_theta=None):
 
         # take out the current lcs system parameter
-        lcs_theta = lcs_learner.computeLCSMats()
+        if lcs_theta is None:
+            lcs_theta = lcs_learner.computeLCSMats()
 
         # set the optimal control bounds
         lbw = self.lbw

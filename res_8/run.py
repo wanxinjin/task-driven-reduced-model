@@ -64,16 +64,20 @@ learner_mpc.initialize_mpc(mpc_horizon)
 
 # ============================= initialize the optimizer
 optimizier = opt.Adam()
-optimizier.learning_rate = 5e-3
+optimizier.learning_rate = 1e-3
 
 # ================= starting the data-driven model learning process
 control_cost_trace = []
-lcs_theta_trace=[]
+lcs_theta_trace = []
 prev_control_traj_batch = []
 prev_state_traj_batch = []
+prev_x_hist = []
+prev_u_hist = []
+kl_dist_trace = []
+fig, axs = plt.subplots(3, 1)
 for control_iter in range(20):
     # =========== use the mpc controller (based on the lcs model) to simulate the true system
-    traj_count = 10
+    traj_count = 8
     # np.random.seed(10)
     init_state_batch = np.random.randn(traj_count, n_state)
     state_traj_batch, control_traj_batch, cost_batch = utility.simulate_mpc_on_lcs(learner_mpc,
@@ -81,28 +85,46 @@ for control_iter in range(20):
                                                                                    true_lcs,
                                                                                    init_state_batch,
                                                                                    control_horizon)
+
+    # compute histgram
+    x_batch, x_hist, u_batch, u_hist = utility.histogram(state_traj_batch, control_traj_batch)
+    kl_distance = utility.kl_hist(x_hist, prev_x_hist)
+    kl_dist_trace += [kl_distance]
+
+    axs[0].cla()
+    axs[1].cla()
+    axs[2].cla()
+    axs[0].hist(x_batch[:, 0], bins=10, range=(-5, 5), density=True, facecolor='r')
+    axs[1].hist(x_batch[:, 1], bins=10, range=(-5, 5), density=True, facecolor='g')
+    axs[2].hist(x_batch[:, 2], bins=10, range=(-5, 5), density=True, facecolor='b')
+
+    plt.pause(0.05)
+
     print(
         '\n======================================================================'
         '\n|****** Control Iter:', control_iter,
         '| current control cost:', np.mean(cost_batch),
         '| true control cost:', np.mean(true_cost_batch),
+        '| kl distance:', kl_distance,
         '\n'
     )
     control_cost_trace += [np.mean(cost_batch)]
-
+    lcs_theta_trace += [lcs_learner.computeLCSMats()]
     # ============================= learn the true lcs system from the true data
     print('lcs learning ')
     TD.LCSRegressionBuffer(lcs_learner, optimizier,
                            control_traj_batch, state_traj_batch,
                            prev_control_traj_batch, prev_state_traj_batch,
                            buffer_ratio=0.8,
-                           max_iter=500,
+                           max_iter=1000,
                            minibatch_size=200,
                            print_level=1)
 
     # ============================= update the history data
     prev_control_traj_batch = control_traj_batch
     prev_state_traj_batch = state_traj_batch
+    prev_x_hist = x_hist
+    prev_u_hist = u_hist
 
 # save the learned model
 learned_lcs_mats = lcs_learner.computeLCSMats(compact=False)
@@ -112,10 +134,12 @@ np.save('results',
             'control_cost_trace': control_cost_trace,
             'learned_lcs_mats': learned_lcs_mats,
             'learned_lcs_theta': learned_lcs_theta,
+            'lcs_theta_trace': lcs_theta_trace,
             'Q': Q,
             'QN': QN,
             'R': R,
             'reduced_n_lam': reduced_n_lam,
             'control_horizon': control_horizon,
             'mpc_horizon': mpc_horizon,
+            'kl_dist_trace': kl_dist_trace,
         })
