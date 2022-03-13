@@ -100,13 +100,13 @@ def simulate_mpc_on_lcs_kl(mpc_controller_kl, lcs_theta, sys, init_state_batch, 
         ref_state_traj = np.zeros((control_horizon, n_state))
         ref_control_traj = np.zeros((control_horizon, n_control))
     else:
-        kl_epsilon = 1000.0
-        # ref_state_traj = np.array(buffer_state_traj_batch).mean(axis=0)
-        # ref_control_traj = np.array(buffer_control_traj_batch).mean(axis=0)
-        ref_state_traj = np.vstack(buffer_state_traj_batch).mean(axis=0)
-        ref_control_traj = np.vstack(buffer_control_traj_batch).mean(axis=0)
-        ref_state_traj = np.tile(ref_state_traj, (control_horizon, 1))
-        ref_control_traj = np.tile(ref_control_traj, (control_horizon, 1))
+        kl_epsilon = 10.0
+        ref_state_traj = np.array(buffer_state_traj_batch).mean(axis=0)
+        ref_control_traj = np.array(buffer_control_traj_batch).mean(axis=0)
+        # ref_state_traj = np.vstack(buffer_state_traj_batch).mean(axis=0)
+        # ref_control_traj = np.vstack(buffer_control_traj_batch).mean(axis=0)
+        # ref_state_traj = np.tile(ref_state_traj, (control_horizon, 1))
+        # ref_control_traj = np.tile(ref_control_traj, (control_horizon, 1))
 
     traj_count = init_state_batch.shape[0]
     state_traj_batch = []
