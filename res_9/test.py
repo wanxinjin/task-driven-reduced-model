@@ -75,7 +75,6 @@ true_mpc.initialize_mpc(mpc_horizon)
 reduced_n_lam = load['reduced_n_lam']
 print('n_lam for the learner:', reduced_n_lam)
 lcs_learner = TD.LCS_learner_regression(n_state, n_control, n_lam=reduced_n_lam, stiffness=1)
-# lcs_learner.val_lcs_theta = learned_lcs_theta
 lcs_learner.val_lcs_theta = learned_lcs_theta
 
 # ============================= initialize an mpc for the learned system
@@ -95,8 +94,12 @@ state_traj_batch, control_traj_batch, cost_batch = utility.simulate_mpc_on_lcs(
     true_sys,
     init_state_batch,
     control_horizon,
-    lcs_theta_trace[-1]
+    learned_lcs_theta
 )
+
+print('mean:', np.mean(cost_batch))
+
+
 
 # plot
 for sys_trajectory in state_traj_batch:

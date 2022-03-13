@@ -90,6 +90,87 @@ def simulate_mpc_on_lcs(mpc_controller, mpc_lcs, lcs, init_state_batch, control_
     return state_traj_batch, control_traj_batch, cost_batch
 
 
+def simulate_mpc_on_lcs_kl(mpc_controller_kl, lcs_theta, sys, init_state_batch, control_horizon,
+                           buffer_state_traj_batch=None, buffer_control_traj_batch=None):
+    n_state = mpc_controller_kl.n_state
+    n_control = mpc_controller_kl.n_control
+
+    if (buffer_state_traj_batch is None) or (len(buffer_state_traj_batch) == 0):
+        kl_epsilon = 0.0
+        ref_state_traj = np.zeros((control_horizon, n_state))
+        ref_control_traj = np.zeros((control_horizon, n_control))
+    else:
+        kl_epsilon = 1000.0
+        # ref_state_traj = np.array(buffer_state_traj_batch).mean(axis=0)
+        # ref_control_traj = np.array(buffer_control_traj_batch).mean(axis=0)
+        ref_state_traj = np.vstack(buffer_state_traj_batch).mean(axis=0)
+        ref_control_traj = np.vstack(buffer_control_traj_batch).mean(axis=0)
+        ref_state_traj = np.tile(ref_state_traj, (control_horizon, 1))
+        ref_control_traj = np.tile(ref_control_traj, (control_horizon, 1))
+
+    traj_count = init_state_batch.shape[0]
+    state_traj_batch = []
+    control_traj_batch = []
+    for i in range(traj_count):
+        state_traj = [init_state_batch[i]]
+        control_traj = []
+        for t in range(control_horizon):
+            # compute the current control input
+            ref_xt = ref_state_traj[t]
+            ref_ut = ref_control_traj[t]
+            control_traj += [mpc_controller_kl.mpc_step_kl(lcs_theta, state_traj[-1], kl_epsilon, ref_xt, ref_ut)]
+            # compute the true state
+            next_state, curr_lam = sys.dynamics_step(state_traj[-1], control_traj[-1])
+            state_traj += [next_state]
+        # combine them together
+        state_traj_batch += [np.array(state_traj)]
+        control_traj_batch += [np.array(control_traj)]
+
+    # compute the current control cost
+    cost_batch = mpc_controller_kl.compute_cost(control_traj_batch, state_traj_batch)
+
+    return state_traj_batch, control_traj_batch, cost_batch
+
+def simulate_mpc_on_lcs_kl2(mpc_controller_kl, lcs_theta, sys, init_state_batch, control_horizon,
+                            buffer_control_traj_batch=None):
+    n_state = mpc_controller_kl.n_state
+    n_control = mpc_controller_kl.n_control
+
+    if (buffer_control_traj_batch is None) or (len(buffer_control_traj_batch) == 0):
+        kl_epsilon = 0.0
+        ref_state_traj = np.zeros((control_horizon, n_state))
+        ref_control_traj = np.zeros((control_horizon, n_control))
+    else:
+        kl_epsilon = 10000.0
+        ref_control_traj = np.array(buffer_control_traj_batch).mean(axis=0)
+        # ref_control_traj = np.vstack(buffer_control_traj_batch).mean(axis=0)
+        # ref_control_traj = np.tile(ref_control_traj, (control_horizon, 1))
+        print(kl_epsilon)
+
+    traj_count = init_state_batch.shape[0]
+    state_traj_batch = []
+    control_traj_batch = []
+    for i in range(traj_count):
+        state_traj = [init_state_batch[i]]
+        control_traj = []
+        for t in range(control_horizon):
+            # compute the current control input
+            ref_ut = ref_control_traj[t]
+            control_traj += [mpc_controller_kl.mpc_step_kl(lcs_theta, state_traj[-1], kl_epsilon,  ref_ut)]
+            # compute the true state
+            next_state, curr_lam = sys.dynamics_step(state_traj[-1], control_traj[-1])
+            state_traj += [next_state]
+        # combine them together
+        state_traj_batch += [np.array(state_traj)]
+        control_traj_batch += [np.array(control_traj)]
+
+    # compute the current control cost
+    cost_batch = mpc_controller_kl.compute_cost(control_traj_batch, state_traj_batch)
+
+    return state_traj_batch, control_traj_batch, cost_batch
+
+
+
 def histogram(state_traj_batch, control_traj_batch):
     n_state = state_traj_batch[0].shape[1]
     n_control = control_traj_batch[0].shape[1]
